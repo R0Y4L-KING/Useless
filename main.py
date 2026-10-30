@@ -1,7 +1,12 @@
 import threading
 import asyncio
+import io
+import json
 import os
+import random
 import time
+import datetime
+from urllib.parse import quote
 import telebot
 from telebot import types
 from telethon import TelegramClient, events
@@ -36,6 +41,24 @@ COVER_URL = os.environ.get(
     'COVER_URL',
     'https://raw.githubusercontent.com/R0Y4L-KING/Useless/main/cover.jpg',
 )
+
+# ---- Premium / payment (UPI only, koi crypto nahi) ----
+UPI_ID = os.environ.get('UPI_ID', '20213904@axl')
+UPI_NAME = os.environ.get('UPI_NAME', 'ModAppsKing')
+SUPPORT_LINK = os.environ.get('SUPPORT_LINK', 'https://t.me/R0Y4L_KING')
+
+# Free users ke liye rozana download limit. 0 = unlimited (koi rok nahi)
+FREE_DAILY_LIMIT = int(os.environ.get('FREE_DAILY_LIMIT', '0'))
+
+# Premium data: MongoDB (recommended) ya local JSON file
+MONGODB_URI = os.environ.get('MONGODB_URI', '')
+DB_PATH = os.environ.get('DB_PATH', 'premium_db.json')
+
+PLANS = {
+    "p29": {"price": 29, "days": 21, "label": "₹29 → 21 days"},
+    "p49": {"price": 49, "days": 35, "label": "₹49 → 35 days"},
+    "p99": {"price": 99, "days": 99, "label": "₹99 → 99 days"},
+}
 # ===================================================================
 
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -257,7 +280,7 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id):
                 progress_text = msg.text
                 if progress_text != last_progress_text:
                     plan_markup = types.InlineKeyboardMarkup()
-                    plan_markup.add(types.InlineKeyboardButton("💎 Buy Premium", url=PLAN_LINK))
+                    plan_markup.add(types.InlineKeyboardButton("💎 Buy Premium", callback_data="premium_menu"))
                     _edit(
                         user_chat_id,
                         call_msg_id,
@@ -360,12 +383,514 @@ threading.Thread(target=start_telethon_thread, daemon=True).start()
 # ====================================================
 
 
+# ================= PREMIUM STORE + PAYMENT (UPI) =================
+try:
+    from pymongo import MongoClient
+except Exception:
+    MongoClient = None
+
+
+class Store:
+    """Premium users + orders. MONGODB_URI ho to Mongo, warna local JSON."""
+
+    def __init__(self, mongo_uri, json_path):
+        self._lock = threading.Lock()
+        self._users = None
+        self._orders = None
+        self._path = json_path
+        self._data = {"users": {}, "orders": {}}
+
+        if mongo_uri and MongoClient:
+            try:
+                client = MongoClient(mongo_uri, serverSelectionTimeoutMS=8000)
+                client.admin.command("ping")
+                try:
+                    db = client.get_default_database()
+                except Exception:
+                    db = client["faphouse"]
+                self._users = db["users"]
+                self._orders = db["orders"]
+                print("[store] MongoDB connected")
+                return
+            except Exception as e:
+                print(f"[store] Mongo connect fail ({e}) — local JSON use hoga")
+
+        self._load()
+        print(f"[store] local JSON store: {self._path}")
+
+    def _load(self):
+        if os.path.exists(self._path):
+            try:
+                with open(self._path, "r") as f:
+                    self._data = json.load(f)
+            except Exception as e:
+                print(f"[store] load fail: {e}")
+
+    def _save(self):
+        if self._users is not None:
+            return
+        tmp = self._path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(self._data, f)
+        os.replace(tmp, self._path)
+
+    def get_user(self, user_id):
+        uid = str(user_id)
+        if self._users is not None:
+            doc = self._users.find_one({"_id": uid}) or {}
+            doc.pop("_id", None)
+            return doc
+        with self._lock:
+            return dict(self._data["users"].get(uid, {}))
+
+    def update_user(self, user_id, **fields):
+        uid = str(user_id)
+        if self._users is not None:
+            self._users.update_one({"_id": uid}, {"$set": fields}, upsert=True)
+            return
+        with self._lock:
+            self._data["users"].setdefault(uid, {}).update(fields)
+            self._save()
+
+    def save_order(self, order_id, order):
+        if self._orders is not None:
+            self._orders.update_one({"_id": str(order_id)}, {"$set": order}, upsert=True)
+            return
+        with self._lock:
+            self._data["orders"].setdefault(str(order_id), {}).update(order)
+            self._save()
+
+    def get_order(self, order_id):
+        if self._orders is not None:
+            doc = self._orders.find_one({"_id": str(order_id)}) or {}
+            doc.pop("_id", None)
+            return doc
+        with self._lock:
+            return dict(self._data["orders"].get(str(order_id), {}))
+
+    def set_order_status(self, order_id, status):
+        self.save_order(order_id, {"status": status})
+
+
+store = Store(MONGODB_URI, DB_PATH)
+awaiting_utr = {}
+
+
+def _now():
+    return datetime.datetime.utcnow()
+
+
+def premium_until(user_id):
+    """Active premium expiry (datetime) ya None."""
+    exp = store.get_user(user_id).get("premium_until")
+    if not exp:
+        return None
+    try:
+        until = datetime.datetime.fromisoformat(str(exp))
+    except Exception:
+        return None
+    return until if until > _now() else None
+
+
+def is_premium(user_id):
+    return premium_until(user_id) is not None
+
+
+def grant_premium(user_id, days):
+    base = premium_until(user_id) or _now()
+    until = base + datetime.timedelta(days=int(days))
+    store.update_user(user_id, premium_until=until.isoformat())
+    return until
+
+
+def revoke_premium(user_id):
+    store.update_user(user_id, premium_until=None)
+
+
+def _today():
+    return _now().strftime("%Y-%m-%d")
+
+
+def usage_today(user_id):
+    user = store.get_user(user_id)
+    if user.get("usage_date") != _today():
+        return 0
+    return int(user.get("usage_count", 0))
+
+
+def bump_usage(user_id):
+    user = store.get_user(user_id)
+    store.update_user(
+        user_id,
+        usage_date=_today(),
+        usage_count=usage_today(user_id) + 1,
+        total_downloads=int(user.get("total_downloads", 0)) + 1,
+    )
+
+
+def download_allowed(user_id):
+    """(allowed, alert_text)"""
+    if is_premium(user_id) or FREE_DAILY_LIMIT <= 0:
+        return True, ""
+    if usage_today(user_id) >= FREE_DAILY_LIMIT:
+        return False, (
+            f"Aaj ki free limit ({FREE_DAILY_LIMIT} downloads) khatam ho gayi.\n"
+            "Unlimited ke liye /premium lo."
+        )
+    return True, ""
+
+
+def upi_qr(amount, note):
+    """UPI intent ka QR (PNG BytesIO) — amount pre-filled."""
+    import qrcode
+
+    upi_url = (
+        f"upi://pay?pa={quote(UPI_ID)}&pn={quote(UPI_NAME)}"
+        f"&am={amount}&cu=INR&tn={quote(note)}"
+    )
+    qr = qrcode.QRCode(box_size=10, border=3)
+    qr.add_data(upi_url)
+    qr.make(fit=True)
+    img = qr.make_image(fill_color="black", back_color="white")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
+def plans_markup():
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    for key, plan in PLANS.items():
+        markup.add(types.InlineKeyboardButton(plan["label"], callback_data=f"plan:{key}"))
+    markup.add(types.InlineKeyboardButton("❌ Cancel", callback_data="premium_cancel"))
+    return markup
+
+
+def send_plans(chat_id):
+    free_line = (
+        f"🆓 Free: {FREE_DAILY_LIMIT} downloads/day"
+        if FREE_DAILY_LIMIT > 0 else "🆓 Free: unlimited downloads"
+    )
+    bot.send_message(
+        chat_id,
+        "💎 **Choose your Premium Plan**\n\n"
+        "Select a plan below to get unlimited downloads.\n"
+        f"{free_line}",
+        reply_markup=plans_markup(),
+        parse_mode="Markdown",
+    )
+
+
+@bot.message_handler(commands=['premium'])
+def premium_command(message):
+    send_plans(message.chat.id)
+
+
+@bot.message_handler(func=lambda msg: msg.text == "💎 Premium")
+def premium_button(message):
+    send_plans(message.chat.id)
+
+
+@bot.message_handler(commands=['cancel'])
+def cancel_command(message):
+    user_requests.pop(message.chat.id, None)
+    awaiting_utr.pop(message.from_user.id, None)
+    bot.send_message(message.chat.id, "✅ Sab reset ho gaya. Naya link bhej do.")
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "premium_menu")
+def cb_premium_menu(call):
+    bot.answer_callback_query(call.id)
+    send_plans(call.message.chat.id)
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "premium_cancel")
+def cb_premium_cancel(call):
+    bot.answer_callback_query(call.id, "Cancel ho gaya.")
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("plan:"))
+def cb_plan(call):
+    key = call.data.split(":", 1)[1]
+    plan = PLANS.get(key)
+    if not plan:
+        bot.answer_callback_query(call.id, "Plan nahi mila, /premium dobara bhejo.", show_alert=True)
+        return
+    bot.answer_callback_query(call.id)
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(types.InlineKeyboardButton("⭐ Pay via UPI QR", callback_data=f"pay:{key}"))
+    markup.add(types.InlineKeyboardButton("⬅️ Back", callback_data="premium_menu"))
+    try:
+        bot.edit_message_text(
+            f"💎 **{plan['label']}**\n\n"
+            f"Amount: ₹{plan['price']}\n"
+            f"Validity: {plan['days']} days\n\n"
+            "Payment method choose karo:",
+            chat_id=call.message.chat.id,
+            message_id=call.message.message_id,
+            reply_markup=markup,
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        print(f"[premium] plan edit fail: {e}")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("pay:"))
+def cb_pay(call):
+    key = call.data.split(":", 1)[1]
+    plan = PLANS.get(key)
+    if not plan:
+        bot.answer_callback_query(call.id, "Plan nahi mila.", show_alert=True)
+        return
+
+    order_id = str(random.randint(10000000, 99999999))
+    store.save_order(order_id, {
+        "user_id": call.from_user.id,
+        "plan": key,
+        "price": plan["price"],
+        "days": plan["days"],
+        "status": "pending",
+        "created": _now().isoformat(),
+    })
+
+    bot.answer_callback_query(call.id, "QR ban raha hai...")
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+
+    caption = (
+        "💎 **Premium Subscription Payment**\n\n"
+        f"💰 Amount: ₹{plan['price']}\n"
+        f"📅 Validity: {plan['days']} days\n"
+        f"🧾 Order ID: {order_id}\n"
+        f"🏦 UPI ID: {UPI_ID}\n\n"
+        "**Payment Instructions:**\n"
+        "1️⃣ QR ko kisi bhi UPI app se scan karo\n"
+        f"2️⃣ Exactly ₹{plan['price']} pay karo\n"
+        "3️⃣ Payment ke baad 'I have paid' dabao\n\n"
+        "⚠️ Payment verify hone ke baad premium auto-activate ho jaayega."
+    )
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(types.InlineKeyboardButton("✅ I have paid", callback_data=f"paid:{order_id}"))
+    markup.add(types.InlineKeyboardButton("❌ CANCEL ORDER", callback_data=f"cancelorder:{order_id}"))
+
+    try:
+        bot.send_photo(
+            call.message.chat.id,
+            upi_qr(plan["price"], f"Premium {order_id}"),
+            caption=caption,
+            reply_markup=markup,
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        print(f"[premium] QR send fail: {e}")
+        bot.send_message(
+            call.message.chat.id,
+            caption + f"\n\nUPI ID: {UPI_ID}",
+            reply_markup=markup,
+        )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("cancelorder:"))
+def cb_cancel_order(call):
+    order_id = call.data.split(":", 1)[1]
+    store.set_order_status(order_id, "cancelled")
+    bot.answer_callback_query(call.id, "Order cancel ho gaya.")
+    try:
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+    bot.send_message(
+        call.message.chat.id,
+        "❌ Payment process cancelled. Naya order start karne ke liye /premium bhejo.",
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("paid:"))
+def cb_paid(call):
+    order_id = call.data.split(":", 1)[1]
+    order = store.get_order(order_id)
+    if not order or order.get("status") in ("cancelled", "approved"):
+        bot.answer_callback_query(
+            call.id, "Ye order valid nahi hai. /premium se naya order banao.", show_alert=True
+        )
+        return
+    awaiting_utr[call.from_user.id] = order_id
+    bot.answer_callback_query(call.id)
+    bot.send_message(
+        call.message.chat.id,
+        "🧾 Apna **UTR / Transaction ID** (12 digit) bhejo, ya payment ka screenshot bhejo.\n\n"
+        f"Order ID: {order_id}",
+        parse_mode="Markdown",
+    )
+
+
+@bot.message_handler(content_types=['photo', 'text'], func=lambda m: m.from_user.id in awaiting_utr)
+def handle_utr(message):
+    order_id = awaiting_utr.pop(message.from_user.id, None)
+    if not order_id:
+        return
+    order = store.get_order(order_id)
+    if not order:
+        bot.send_message(message.chat.id, "Order nahi mila. /premium se naya order banao.")
+        return
+
+    utr = (message.text or "").strip() or "(screenshot)"
+    store.save_order(order_id, {
+        "utr": utr,
+        "status": "claimed",
+        "claimed_at": _now().isoformat(),
+    })
+
+    bot.send_message(
+        message.chat.id,
+        "✅ Payment claim mil gaya!\n\n"
+        "Verify hone me 5-10 minute lag sakte hain. Approve hote hi premium activate ho jaayega.",
+    )
+
+    owner_text = (
+        "🔔 NEW PAYMENT CLAIM\n\n"
+        f"User: {message.from_user.first_name} (id: {message.from_user.id})\n"
+        f"Order: {order_id}\n"
+        f"Amount: Rs {order.get('price')}\n"
+        f"Days: {order.get('days')}\n"
+        f"UTR / Note: {utr}"
+    )
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    markup.add(
+        types.InlineKeyboardButton("✅ Approve", callback_data=f"approve:{order_id}"),
+        types.InlineKeyboardButton("❌ Reject", callback_data=f"reject:{order_id}"),
+    )
+
+    try:
+        if message.photo:
+            bot.send_photo(
+                OWNER_ID, message.photo[-1].file_id,
+                caption=owner_text, reply_markup=markup,
+            )
+        else:
+            bot.send_message(OWNER_ID, owner_text, reply_markup=markup)
+    except Exception as e:
+        print(f"[premium] owner notify fail: {e}")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith(("approve:", "reject:")))
+def cb_verify(call):
+    if call.from_user.id != OWNER_ID:
+        bot.answer_callback_query(call.id, "Sirf owner ye kar sakta hai.", show_alert=True)
+        return
+
+    action, order_id = call.data.split(":", 1)
+    order = store.get_order(order_id)
+    if not order:
+        bot.answer_callback_query(call.id, "Order nahi mila.", show_alert=True)
+        return
+
+    user_id = order.get("user_id")
+    if action == "approve":
+        until = grant_premium(user_id, order.get("days", 0))
+        store.set_order_status(order_id, "approved")
+        bot.answer_callback_query(call.id, "Approved ✅")
+        try:
+            bot.send_message(
+                user_id,
+                "✅ **Payment mil gaya!**\n\n"
+                f"💎 Premium active: {until.strftime('%d %b %Y, %I:%M %p')} (UTC) tak\n\n"
+                "Ab unlimited downloads — enjoy! 🚀",
+                parse_mode="Markdown",
+            )
+        except Exception as e:
+            print(f"[premium] user notify fail: {e}")
+    else:
+        store.set_order_status(order_id, "rejected")
+        bot.answer_callback_query(call.id, "Rejected ❌")
+        try:
+            bot.send_message(
+                user_id,
+                "❌ Payment verify nahi hua.\n\n"
+                f"Agar paisa cut gaya hai to support pe message karo: {SUPPORT_LINK}\n"
+                f"Order ID: {order_id}",
+            )
+        except Exception as e:
+            print(f"[premium] user notify fail: {e}")
+
+    label = "✅ APPROVED" if action == "approve" else "❌ REJECTED"
+    try:
+        if call.message.caption is not None:
+            bot.edit_message_caption(
+                caption=call.message.caption + "\n\n" + label,
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+            )
+        else:
+            bot.edit_message_text(
+                text=(call.message.text or "") + "\n\n" + label,
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+            )
+    except Exception:
+        pass
+
+
+@bot.message_handler(commands=['grant'])
+def cmd_grant(message):
+    """/grant <user_id> <days>"""
+    if message.from_user.id != OWNER_ID:
+        return
+    parts = (message.text or "").split()
+    if len(parts) != 3:
+        bot.send_message(message.chat.id, "Use: /grant <user_id> <days>")
+        return
+    try:
+        user_id = int(parts[1])
+        days = int(parts[2])
+    except ValueError:
+        bot.send_message(message.chat.id, "user_id aur days number hone chahiye.")
+        return
+    until = grant_premium(user_id, days)
+    bot.send_message(
+        message.chat.id,
+        f"✅ {user_id} ko {days} din ka premium diya. Expiry: {until.strftime('%d %b %Y, %I:%M %p')} UTC",
+    )
+    try:
+        bot.send_message(
+            user_id,
+            f"💎 Premium activated! Valid till {until.strftime('%d %b %Y, %I:%M %p')} (UTC).",
+        )
+    except Exception:
+        pass
+
+
+@bot.message_handler(commands=['revoke'])
+def cmd_revoke(message):
+    """/revoke <user_id>"""
+    if message.from_user.id != OWNER_ID:
+        return
+    parts = (message.text or "").split()
+    if len(parts) != 2:
+        bot.send_message(message.chat.id, "Use: /revoke <user_id>")
+        return
+    try:
+        user_id = int(parts[1])
+    except ValueError:
+        bot.send_message(message.chat.id, "user_id number hona chahiye.")
+        return
+    revoke_premium(user_id)
+    bot.send_message(message.chat.id, f"✅ {user_id} ka premium hata diya.")
+
+
 # ================= BOT UI =================
 def get_main_keyboard():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(
         types.KeyboardButton("📥 Download"),
-        types.KeyboardButton("📊 Status")
+        types.KeyboardButton("📊 Status"),
+        types.KeyboardButton("💎 Premium")
     )
     return markup
 
@@ -401,24 +926,37 @@ def handle_download_btn(message):
         "👇 **Bas link paste karo aur dekhte jao!**"
     )
     markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("💎 Buy Premium", url=PLAN_LINK))
+    markup.add(types.InlineKeyboardButton("💎 Buy Premium", callback_data="premium_menu"))
     
     bot.send_message(message.chat.id, text, reply_markup=markup, parse_mode="Markdown")
 
 @bot.message_handler(func=lambda msg: msg.text == "📊 Status")
 def handle_status_btn(message):
+    uid = message.chat.id
+    until = premium_until(uid)
+    user = store.get_user(uid)
+
+    if until:
+        plan_line = f"💎 Premium ({until.strftime('%d %b %Y')} tak)"
+        usage_line = "Unlimited"
+    else:
+        plan_line = "🆓 Free"
+        usage_line = (
+            f"{usage_today(uid)}/{FREE_DAILY_LIMIT}"
+            if FREE_DAILY_LIMIT > 0 else "Unlimited"
+        )
+
     text = (
         "📊 **Live Status Dashboard**\n\n"
-        "🤖 **Bot:** bot1\n"
-        "🔄 **Active Tasks (Global):** 0/10\n\n"
+        f"🤖 **Bot:** {MAIN_BOT_NAME}\n\n"
         "👤 **Aapka Profile:**\n"
-        "🏷 **Plan:** 🆓 Free\n"
-        "📥 **Chal rahe Downloads:** 0/2\n"
-        "✅ **Total Downloads:** 2\n\n"
+        f"🏷 **Plan:** {plan_line}\n"
+        f"📥 **Aaj ke downloads:** {usage_line}\n"
+        f"✅ **Total Downloads:** {int(user.get('total_downloads', 0))}\n\n"
         "💡 _Download atak gaya? /cancel bhejo — sab reset!_"
     )
     markup = types.InlineKeyboardMarkup()
-    markup.add(types.InlineKeyboardButton("💎 Buy Premium", url=PLAN_LINK))
+    markup.add(types.InlineKeyboardButton("💎 Buy Premium", callback_data="premium_menu"))
     
     bot.send_message(message.chat.id, text, reply_markup=markup, parse_mode="Markdown")
 
@@ -453,8 +991,14 @@ def process_download(call):
         
     url = user_requests[chat_id]
     
+    allowed, why = download_allowed(chat_id)
+    if not allowed:
+        bot.answer_callback_query(call.id, why, show_alert=True)
+        return
+    bump_usage(chat_id)
+
     plan_markup = types.InlineKeyboardMarkup()
-    plan_markup.add(types.InlineKeyboardButton("💎 Buy Premium - No Waiting!", url=PLAN_LINK))
+    plan_markup.add(types.InlineKeyboardButton("💎 Buy Premium - No Waiting!", callback_data="premium_menu"))
     
     try:
         bot.answer_callback_query(call.id, "⏳ Download shuru ho raha hai...")
@@ -494,7 +1038,7 @@ def handle_delivery(message):
         video_msg_id = message.reply_to_message.message_id
         
         markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("💎 Buy Premium", url=PLAN_LINK))
+        markup.add(types.InlineKeyboardButton("💎 Buy Premium", callback_data="premium_menu"))
         
         sent = bot.copy_message(
             chat_id=target_user_id,

@@ -491,7 +491,8 @@ except Exception:
 
 
 def _now():
-    return datetime.datetime.utcnow()
+    # naive UTC (deprecated utcnow() ki jagah — same behaviour, warning nahi)
+    return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
 
 
 class Store:

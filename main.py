@@ -57,11 +57,46 @@ FREE_DAILY_LIMIT = int(os.environ.get('FREE_DAILY_LIMIT', '0'))
 MONGODB_URI = os.environ.get('MONGODB_URI', '')
 DB_PATH = os.environ.get('DB_PATH', 'premium_db.json')
 
+# UPI payment page (hosted QR page)
+PAYMENT_PAGE_URL = os.environ.get(
+    'PAYMENT_PAGE_URL', 'https://r0y4l-king.github.io/upi-pay/'
+)
+PREMIUM_BANNER_URL = os.environ.get(
+    'PREMIUM_BANNER_URL',
+    'https://raw.githubusercontent.com/R0Y4L-KING/Useless/main/premium_banner.jpg',
+)
+
+LIFETIME_DAYS = 36500
+
 PLANS = {
-    "p29": {"price": 29, "days": 21, "label": "₹29 → 21 days"},
-    "p49": {"price": 49, "days": 35, "label": "₹49 → 35 days"},
-    "p99": {"price": 99, "days": 99, "label": "₹99 → 99 days"},
+    "p50": {"price": 50, "days": 30, "label": "1 Month — ₹50"},
+    "p120": {"price": 120, "days": 90, "label": "3 Months — ₹120 (Save 20%)"},
+    "p200": {"price": 200, "days": LIFETIME_DAYS, "label": "Lifetime — ₹200"},
 }
+
+
+def _validity_text(days):
+    days = int(days)
+    if days >= LIFETIME_DAYS:
+        return "Lifetime"
+    if days >= 30 and days % 30 == 0:
+        months = days // 30
+        return "1 Month" if months == 1 else f"{months} Months"
+    return f"{days} days"
+
+
+def _expiry_text(until, days):
+    if int(days) >= LIFETIME_DAYS:
+        return "Lifetime access — kabhi expire nahi hoga"
+    return f"{until.strftime('%d %b %Y, %I:%M %p')} (UTC) tak"
+
+
+def _plan_line(until):
+    if until is None:
+        return "🆓 Free"
+    if (until - _now()).days > 3650:
+        return "💎 Premium (Lifetime)"
+    return f"💎 Premium ({until.strftime('%d %b %Y')} tak)"
 
 # ---- Razorpay (auto payment detection) ----
 # Dono keys set hain to payment AUTOMATIC verify hota hai (webhook + polling).
@@ -681,7 +716,7 @@ def activate_order(order_id, source="auto"):
         bot.send_message(
             user_id,
             "✅ **Payment detected!**\n\n"
-            f"💎 Premium active: {until.strftime('%d %b %Y, %I:%M %p')} (UTC) tak\n"
+            f"💎 Premium: {_expiry_text(until, order.get('days', 0))}\n"
             f"🧾 Order: {order_id}\n\n"
             "Ab unlimited downloads — enjoy! 🚀",
             parse_mode="Markdown",
@@ -745,26 +780,61 @@ def plans_markup():
     markup = types.InlineKeyboardMarkup(row_width=1)
     for key, plan in PLANS.items():
         markup.add(types.InlineKeyboardButton(plan["label"], callback_data=f"plan:{key}"))
-    markup.add(types.InlineKeyboardButton("❌ Cancel", callback_data="premium_cancel"))
+    markup.add(types.InlineKeyboardButton("🌐 Pay Now (UPI)", url=PAYMENT_PAGE_URL))
+    markup.add(types.InlineKeyboardButton("⬅️ Back to Home", callback_data="back_home"))
     return markup
 
 
-def send_plans(chat_id):
+def premium_text():
     free_line = (
         f"🆓 Free: {FREE_DAILY_LIMIT} downloads/day"
         if FREE_DAILY_LIMIT > 0 else "🆓 Free: unlimited downloads"
     )
-    bot.send_message(
-        chat_id,
-        "💎 **Choose your Premium Plan**\n\n"
-        "Select a plan below to get unlimited downloads.\n"
-        f"{free_line}",
-        reply_markup=plans_markup(),
-        parse_mode="Markdown",
+    return (
+        "💎 **Premium Membership Plans**\n"
+        "Unlock Unlimited Access & Advanced Features!\n\n"
+        "✨ **Key Benefits:**\n"
+        "♾ Unlimited Daily Downloads\n"
+        "📁 Support for 4GB+ File Sizes\n"
+        "⚡ Instant Processing (Zero Delay)\n"
+        "🖼 Customizable Thumbnails\n"
+        "📝 Personalized Captions\n"
+        "🎧 24/7 Priority Support\n\n"
+        "💳 **Pricing Options:**\n"
+        "• 1 Month: ₹50\n"
+        "• 3 Months: ₹120 (Save 20%)\n"
+        "• Lifetime: ₹200 (One-Time)\n\n"
+        "🏦 **UPI ID:** " + UPI_ID + "\n"
+        "📲 QR: Scan karo ya Pay Now dabao\n"
+        "📤 Payment ke baad 'Send Payment Proof' dabao\n\n"
+        f"{free_line}"
     )
 
 
-@bot.message_handler(commands=['premium'])
+def send_plans(chat_id):
+    sent_photo = False
+    if PREMIUM_BANNER_URL:
+        try:
+            bot.send_photo(
+                chat_id,
+                PREMIUM_BANNER_URL,
+                caption=premium_text(),
+                reply_markup=plans_markup(),
+                parse_mode="Markdown",
+            )
+            sent_photo = True
+        except Exception as e:
+            print(f"[premium] banner fail: {e}")
+    if not sent_photo:
+        bot.send_message(
+            chat_id,
+            premium_text(),
+            reply_markup=plans_markup(),
+            parse_mode="Markdown",
+        )
+
+
+@bot.message_handler(commands=['premium', 'plans', 'buy'])
 def premium_command(message):
     send_plans(message.chat.id)
 
@@ -804,35 +874,36 @@ def cb_plan(call):
         bot.answer_callback_query(call.id, "Plan nahi mila, /premium dobara bhejo.", show_alert=True)
         return
     bot.answer_callback_query(call.id)
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    markup.add(types.InlineKeyboardButton("⭐ Pay via UPI QR", callback_data=f"pay:{key}"))
-    markup.add(types.InlineKeyboardButton("⬅️ Back", callback_data="premium_menu"))
     try:
-        bot.edit_message_text(
-            f"💎 **{plan['label']}**\n\n"
-            f"Amount: ₹{plan['price']}\n"
-            f"Validity: {plan['days']} days\n\n"
-            "Payment method choose karo:",
-            chat_id=call.message.chat.id,
-            message_id=call.message.message_id,
-            reply_markup=markup,
-            parse_mode="Markdown",
-        )
-    except Exception as e:
-        print(f"[premium] plan edit fail: {e}")
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+    except Exception:
+        pass
+    start_payment(call.message.chat.id, call.from_user.id, key)
 
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith("pay:"))
-def cb_pay(call):
-    key = call.data.split(":", 1)[1]
+@bot.callback_query_handler(func=lambda call: call.data == "back_home")
+def cb_back_home(call):
+    bot.answer_callback_query(call.id)
+    bot.send_message(
+        call.message.chat.id,
+        "🏠 **Home**\n\n"
+        "📥 Apna Faphouse link bhejo, baaki mera kaam!\n"
+        "💎 Premium ke liye /premium bhejo.",
+        reply_markup=get_main_keyboard(),
+        parse_mode="Markdown",
+    )
+
+
+def start_payment(chat_id, user_id, key):
+    """Order banao aur payment screen bhejo (auto gateway ya manual UPI)."""
     plan = PLANS.get(key)
     if not plan:
-        bot.answer_callback_query(call.id, "Plan nahi mila.", show_alert=True)
+        bot.send_message(chat_id, "Plan nahi mila. /premium dobara bhejo.")
         return
 
     order_id = str(random.randint(10000000, 99999999))
     store.save_order(order_id, {
-        "user_id": call.from_user.id,
+        "user_id": user_id,
         "plan": key,
         "price": plan["price"],
         "days": plan["days"],
@@ -840,15 +911,9 @@ def cb_pay(call):
         "created": _now().isoformat(),
     })
 
-    bot.answer_callback_query(call.id, "QR ban raha hai...")
-    try:
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-    except Exception:
-        pass
-
     notes = {
         "order_id": order_id,
-        "user_id": str(call.from_user.id),
+        "user_id": str(user_id),
         "days": str(plan["days"]),
     }
 
@@ -868,7 +933,7 @@ def cb_pay(call):
             caption = (
                 "💎 **Premium Subscription Payment**\n\n"
                 f"💰 Amount: ₹{plan['price']}\n"
-                f"📅 Validity: {plan['days']} days\n"
+                f"📅 Validity: {_validity_text(plan['days'])}\n"
                 f"🧾 Order ID: {order_id}\n\n"
                 "**Payment Instructions:**\n"
                 "1️⃣ Neeche wala QR kisi bhi UPI app se scan karo\n"
@@ -885,12 +950,12 @@ def cb_pay(call):
             image = qr.get("image_url")
             if image:
                 bot.send_photo(
-                    call.message.chat.id, image,
+                    chat_id, image,
                     caption=caption, reply_markup=markup, parse_mode="Markdown",
                 )
             else:
                 bot.send_photo(
-                    call.message.chat.id,
+                    chat_id,
                     upi_qr(plan["price"], f"Premium {order_id}"),
                     caption=caption, reply_markup=markup, parse_mode="Markdown",
                 )
@@ -904,22 +969,25 @@ def cb_pay(call):
     caption = (
         "💎 **Premium Subscription Payment**\n\n"
         f"💰 Amount: ₹{plan['price']}\n"
-        f"📅 Validity: {plan['days']} days\n"
+        f"📅 Validity: {_validity_text(plan['days'])}\n"
         f"🧾 Order ID: {order_id}\n"
         f"🏦 UPI ID: {UPI_ID}\n\n"
         "**Payment Instructions:**\n"
-        "1️⃣ QR ko kisi bhi UPI app se scan karo\n"
+        "1️⃣ 'Pay Now (UPI)' dabao ya QR scan karo\n"
         f"2️⃣ Exactly ₹{plan['price']} pay karo\n"
-        "3️⃣ Payment ke baad 'I have paid' dabao\n\n"
-        "⚠️ Payment verify hone ke baad premium auto-activate ho jaayega."
+        "3️⃣ Payment ke baad 'Send Payment Proof' dabao\n\n"
+        "⚠️ Proof verify hone ke baad premium activate ho jaayega."
     )
     markup = types.InlineKeyboardMarkup(row_width=1)
-    markup.add(types.InlineKeyboardButton("✅ I have paid", callback_data=f"paid:{order_id}"))
-    markup.add(types.InlineKeyboardButton("❌ CANCEL ORDER", callback_data=f"cancelorder:{order_id}"))
+    markup.add(types.InlineKeyboardButton("💳 Pay Now (UPI)", url=PAYMENT_PAGE_URL))
+    markup.add(types.InlineKeyboardButton(
+        "📤 Send Payment Proof", callback_data=f"paid:{order_id}"))
+    markup.add(types.InlineKeyboardButton(
+        "❌ CANCEL ORDER", callback_data=f"cancelorder:{order_id}"))
 
     try:
         bot.send_photo(
-            call.message.chat.id,
+            chat_id,
             upi_qr(plan["price"], f"Premium {order_id}"),
             caption=caption,
             reply_markup=markup,
@@ -928,10 +996,16 @@ def cb_pay(call):
     except Exception as e:
         print(f"[premium] QR send fail: {e}")
         bot.send_message(
-            call.message.chat.id,
+            chat_id,
             caption + f"\n\nUPI ID: {UPI_ID}",
             reply_markup=markup,
         )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("pay:"))
+def cb_pay(call):
+    bot.answer_callback_query(call.id, "QR ban raha hai...")
+    start_payment(call.message.chat.id, call.from_user.id, call.data.split(":", 1)[1])
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("checkpay:"))
@@ -1057,7 +1131,7 @@ def cb_verify(call):
             bot.send_message(
                 user_id,
                 "✅ **Payment mil gaya!**\n\n"
-                f"💎 Premium active: {until.strftime('%d %b %Y, %I:%M %p')} (UTC) tak\n\n"
+                f"💎 Premium: {_expiry_text(until, order.get('days', 0))}\n\n"
                 "Ab unlimited downloads — enjoy! 🚀",
                 parse_mode="Markdown",
             )
@@ -1194,7 +1268,7 @@ def handle_status_btn(message):
     user = store.get_user(uid)
 
     if until:
-        plan_line = f"💎 Premium ({until.strftime('%d %b %Y')} tak)"
+        plan_line = _plan_line(until)
         usage_line = "Unlimited"
     else:
         plan_line = "🆓 Free"

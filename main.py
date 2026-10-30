@@ -65,6 +65,11 @@ PREMIUM_BANNER_URL = os.environ.get(
     'PREMIUM_BANNER_URL',
     'https://raw.githubusercontent.com/R0Y4L-KING/Useless/main/premium_banner.jpg',
 )
+# 'Scan to Pay' wala QR image
+SCAN_QR_URL = os.environ.get(
+    'SCAN_QR_URL',
+    'https://raw.githubusercontent.com/R0Y4L-KING/save-restricted-bot/main/assets/upi_qr.png',
+)
 
 LIFETIME_DAYS = 36500
 
@@ -781,33 +786,20 @@ def plans_markup():
     for key, plan in PLANS.items():
         markup.add(types.InlineKeyboardButton(plan["label"], callback_data=f"plan:{key}"))
     markup.add(types.InlineKeyboardButton("🌐 Pay Now (UPI)", url=PAYMENT_PAGE_URL))
+    markup.add(types.InlineKeyboardButton("📲 Scan to Pay", callback_data="scanqr"))
     markup.add(types.InlineKeyboardButton("⬅️ Back to Home", callback_data="back_home"))
     return markup
 
 
 def premium_text():
-    free_line = (
-        f"🆓 Free: {FREE_DAILY_LIMIT} downloads/day"
-        if FREE_DAILY_LIMIT > 0 else "🆓 Free: unlimited downloads"
-    )
     return (
-        "💎 **Premium Membership Plans**\n"
-        "Unlock Unlimited Access & Advanced Features!\n\n"
-        "✨ **Key Benefits:**\n"
-        "♾ Unlimited Daily Downloads\n"
-        "📁 Support for 4GB+ File Sizes\n"
-        "⚡ Instant Processing (Zero Delay)\n"
-        "🖼 Customizable Thumbnails\n"
-        "📝 Personalized Captions\n"
-        "🎧 24/7 Priority Support\n\n"
-        "💳 **Pricing Options:**\n"
+        "💎 **Premium Membership Plans**\n\n"
         "• 1 Month: ₹50\n"
         "• 3 Months: ₹120 (Save 20%)\n"
         "• Lifetime: ₹200 (One-Time)\n\n"
         "🏦 **UPI ID:** " + UPI_ID + "\n"
-        "📲 QR: Scan karo ya Pay Now dabao\n"
-        "📤 Payment ke baad 'Send Payment Proof' dabao\n\n"
-        f"{free_line}"
+        "📲 Scan to Pay ya 🌐 Pay Now (UPI) dabao\n"
+        "📤 Payment ke baad 'Send Payment Proof' bhejo"
     )
 
 
@@ -979,7 +971,9 @@ def start_payment(chat_id, user_id, key):
         "⚠️ Proof verify hone ke baad premium activate ho jaayega."
     )
     markup = types.InlineKeyboardMarkup(row_width=1)
-    markup.add(types.InlineKeyboardButton("💳 Pay Now (UPI)", url=PAYMENT_PAGE_URL))
+    markup.add(types.InlineKeyboardButton("🌐 Pay Now (UPI)", url=PAYMENT_PAGE_URL))
+    markup.add(types.InlineKeyboardButton(
+        "📲 Scan to Pay", callback_data=f"scanqr:{order_id}"))
     markup.add(types.InlineKeyboardButton(
         "📤 Send Payment Proof", callback_data=f"paid:{order_id}"))
     markup.add(types.InlineKeyboardButton(
@@ -1006,6 +1000,53 @@ def start_payment(chat_id, user_id, key):
 def cb_pay(call):
     bot.answer_callback_query(call.id, "QR ban raha hai...")
     start_payment(call.message.chat.id, call.from_user.id, call.data.split(":", 1)[1])
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "scanqr")
+def cb_scan_qr_plain(call):
+    bot.answer_callback_query(call.id)
+    try:
+        bot.send_photo(
+            call.message.chat.id,
+            SCAN_QR_URL,
+            caption=(
+                "📲 **Scan to Pay**\n\n"
+                f"🏦 UPI ID: {UPI_ID}\n"
+                "Kisi bhi UPI app se QR scan karo.\n"
+                "Payment ke baad 'Send Payment Proof' bhejo."
+            ),
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        print(f"[premium] scan qr fail: {e}")
+        bot.send_message(call.message.chat.id, f"🏦 UPI ID: {UPI_ID}")
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("scanqr:"))
+def cb_scan_qr_order(call):
+    order_id = call.data.split(":", 1)[1]
+    order = store.get_order(order_id)
+    bot.answer_callback_query(call.id)
+
+    if order:
+        caption = (
+            "📲 **Scan to Pay**\n\n"
+            f"💰 Amount: ₹{order.get('price')}\n"
+            f"📅 Validity: {_validity_text(order.get('days', 0))}\n"
+            f"🧾 Order ID: {order_id}\n"
+            f"🏦 UPI ID: {UPI_ID}\n\n"
+            "Payment ke baad 'Send Payment Proof' bhejo."
+        )
+    else:
+        caption = f"📲 **Scan to Pay**\n\n🏦 UPI ID: {UPI_ID}"
+
+    try:
+        bot.send_photo(
+            call.message.chat.id, SCAN_QR_URL, caption=caption, parse_mode="Markdown"
+        )
+    except Exception as e:
+        print(f"[premium] scan qr fail: {e}")
+        bot.send_message(call.message.chat.id, caption, parse_mode="Markdown")
 
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith("checkpay:"))

@@ -94,11 +94,16 @@ SCAN_QR_URL = os.environ.get(
 
 LIFETIME_DAYS = 36500
 
+# Prices yahan badal sakte ho — bas price/days/label update karo
 PLANS = {
-    "p50": {"price": 50, "days": 30, "label": "1 Month — ₹50"},
-    "p120": {"price": 120, "days": 90, "label": "3 Months — ₹120 (Save 20%)"},
-    "p200": {"price": 200, "days": LIFETIME_DAYS, "label": "Lifetime — ₹200"},
+    "p15": {"price": 30, "days": 15, "label": "15 Days — ₹30"},
+    "p1m": {"price": 50, "days": 30, "label": "1 Month — ₹50"},
+    "p2m": {"price": 90, "days": 60, "label": "2 Months — ₹90"},
+    "p3m": {"price": 120, "days": 90, "label": "3 Months — ₹120 (Save 20%)"},
 }
+
+# Verification screen ka tutorial link
+TUT_VID = os.environ.get('TUT_VID', 'https://t.me/H0W_2_USE/84')
 
 
 def _validity_text(days):
@@ -498,6 +503,7 @@ class Store:
         self._orders = None
         self._deletions = None
         self._tokens = None
+        self._kv = None
         self._path = json_path
         self._data = {"users": {}, "orders": {}, "deletions": {}, "tokens": {}}
 
@@ -513,6 +519,7 @@ class Store:
                 self._orders = db["orders"]
                 self._deletions = db["deletions"]
                 self._tokens = db["verify_tokens"]
+                self._kv = db["kv"]
                 print("[store] MongoDB connected")
                 return
             except Exception as e:
@@ -573,6 +580,23 @@ class Store:
 
     def set_order_status(self, order_id, status):
         self.save_order(order_id, {"status": status})
+
+    # ---- generic key/value (single-instance lock ke liye) ----
+    def get_kv(self, key):
+        if self._kv is not None:
+            doc = self._kv.find_one({"_id": key}) or {}
+            doc.pop("_id", None)
+            return doc
+        with self._lock:
+            return dict(self._data.get("kv", {}).get(key, {}))
+
+    def set_kv(self, key, doc):
+        if self._kv is not None:
+            self._kv.update_one({"_id": key}, {"$set": doc}, upsert=True)
+            return
+        with self._lock:
+            self._data.setdefault("kv", {})[key] = doc
+            self._save()
 
     # ---- auto-delete queue ----
     def add_deletion(self, key, doc):
@@ -669,7 +693,7 @@ def _deletion_sweeper():
                 store.remove_deletion(key)
         except Exception as e:
             print(f"[auto-delete] sweep error: {e}")
-        time.sleep(60)
+        time.sleep(30)
 
 
 threading.Thread(target=_deletion_sweeper, daemon=True).start()
@@ -930,10 +954,12 @@ def verify_command(message):
         return
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(types.InlineKeyboardButton("🔓 Verify Now (Ads)", url=link))
+    markup.add(types.InlineKeyboardButton("📺 How To Verify", url=TUT_VID))
     bot.send_message(
         message.chat.id,
         f"🔓 **Ad Verification**\n\n"
-        f"Link kholo, checks complete karo, phir {ADS_REWARD_DOWNLOADS} downloads milenge.",
+        f"Link kholo, checks complete karo, phir {ADS_REWARD_DOWNLOADS} downloads milenge.\n"
+        "Samajh nahi aa raha? 'How To Verify' dabao.",
         reply_markup=markup,
         parse_mode="Markdown",
     )
@@ -1127,24 +1153,19 @@ def _handle_rzp_event(payload):
 
 
 def plans_markup():
-    markup = types.InlineKeyboardMarkup(row_width=1)
+    """Sirf plan buttons — payment ka screen plan chunne ke baad aata hai."""
+    markup = types.InlineKeyboardMarkup(row_width=2)
     for key, plan in PLANS.items():
         markup.add(types.InlineKeyboardButton(plan["label"], callback_data=f"plan:{key}"))
-    markup.add(types.InlineKeyboardButton("🌐 Pay Now (UPI)", url=payment_page_url()))
-    markup.add(types.InlineKeyboardButton("📲 Scan to Pay", callback_data="scanqr"))
     markup.add(types.InlineKeyboardButton("⬅️ Back to Home", callback_data="back_home"))
     return markup
 
 
 def premium_text():
     return (
-        "💎 **Premium Membership Plans**\n\n"
-        "• 1 Month: ₹50\n"
-        "• 3 Months: ₹120 (Save 20%)\n"
-        "• Lifetime: ₹200 (One-Time)\n\n"
-        "🏦 **UPI ID:** " + UPI_ID + "\n"
-        "📲 Scan to Pay ya 🌐 Pay Now (UPI) dabao\n"
-        "📤 Payment ke baad 'Send Payment Proof' bhejo"
+        "💎 **Premium Plans**\n\n"
+        "♾ Unlimited downloads • 🚫 No ads • ⚡ Instant\n\n"
+        "Neeche se apna plan chuno 👇"
     )
 
 
@@ -1729,6 +1750,7 @@ def send_verify_gate(chat_id, reason="verify"):
 
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(types.InlineKeyboardButton("🔓 Verify Now (Ads)", url=link))
+    markup.add(types.InlineKeyboardButton("📺 How To Verify", url=TUT_VID))
     markup.add(types.InlineKeyboardButton(
         "💎 Go Premium (Unlimited)", callback_data="premium_menu"))
 
@@ -2043,10 +2065,83 @@ def run_dummy_server():
 threading.Thread(target=run_dummy_server, daemon=True).start()
 # ====================================================
 
+# ================= SINGLE-INSTANCE GUARD =================
+# Render purani + nayi instance kuch der saath chalata hai. Dono getUpdates
+# karengi to Telegram 409 Conflict dega. Ye lock ek waqt me sirf ek instance ko
+# poll karne deta hai (heartbeat DB me rehta hai).
+INSTANCE_ID = (
+    os.environ.get('RENDER_INSTANCE_ID')
+    or os.environ.get('INSTANCE_ID')
+    or ''.join(random.choices("abcdefghijklmnop", k=8))
+)
+LOCK_KEY = "bot_polling_lock"
+LOCK_STALE_SEC = int(os.environ.get('LOCK_STALE_SEC', '120'))
+
+
+def _heartbeat_loop():
+    while True:
+        try:
+            store.set_kv(LOCK_KEY, {"instance_id": INSTANCE_ID, "heartbeat": int(time.time())})
+        except Exception as e:
+            print(f"[lock] heartbeat fail: {e}")
+        time.sleep(30)
+
+
+def acquire_polling_lock(wait_forever=True):
+    """Jab tak lock na mile tab tak wait karo (purana instance marne ka intezaar)."""
+    while True:
+        now = int(time.time())
+        try:
+            doc = store.get_kv(LOCK_KEY)
+        except Exception as e:
+            print(f"[lock] read fail: {e}")
+            doc = {}
+
+        holder = doc.get("instance_id")
+        hb = int(doc.get("heartbeat", 0) or 0)
+        stale = (now - hb) > LOCK_STALE_SEC
+
+        if not holder or holder == INSTANCE_ID or stale:
+            store.set_kv(LOCK_KEY, {"instance_id": INSTANCE_ID, "heartbeat": now})
+            print(f"[lock] polling lock mil gaya (instance {INSTANCE_ID})")
+            return True
+
+        print(f"[lock] doosra instance ({holder}) abhi poll kar raha hai — wait...")
+        if not wait_forever:
+            return False
+        time.sleep(10)
+
+
+# ================= KEEP-ALIVE (self ping) =================
+# Render free service 15 min traffic na aaye to so jaati hai. Bot khud apne
+# public URL ko har 8 minute me ping karta hai — ye inbound request hai,
+# isliye service jaagti rehti hai aur auto-delete sweeper chalta rehta hai.
+def _self_ping_loop():
+    if not PUBLIC_URL:
+        print("[keepalive] PUBLIC_URL set nahi hai — self-ping off (UptimeRobot pe depend karega)")
+        return
+    url = PUBLIC_URL + "/"
+    print(f"[keepalive] self-ping chalu: {url} (har 8 min)")
+    while True:
+        time.sleep(480)
+        try:
+            r = requests.get(url, timeout=25)
+            print(f"[keepalive] ping ok {r.status_code}")
+        except Exception as e:
+            print(f"[keepalive] ping fail: {e}")
+
+
+threading.Thread(target=_self_ping_loop, daemon=True).start()
+
+
 # ================= MAIN LOOP =================
 if __name__ == "__main__":
-    print("Main Bot is Live!")
+    print(f"Main Bot is Live! (instance {INSTANCE_ID})")
     bot.remove_webhook()
+
+    acquire_polling_lock()
+    threading.Thread(target=_heartbeat_loop, daemon=True).start()
+
     while True:
         try:
             bot.infinity_polling(timeout=30, long_polling_timeout=30)
@@ -2055,6 +2150,12 @@ if __name__ == "__main__":
             loop.stop()
             break
         except Exception as e:
-            print(f"[fatal polling error] {e} — 5 sec me restart ho raha hai...")
+            msg = str(e)
+            if "409" in msg or "Conflict" in msg:
+                print("[polling] 409 Conflict — koi doosri instance isi token pe chal rahi hai.")
+                time.sleep(15)
+                acquire_polling_lock()
+                continue
+            print(f"[fatal polling error] {msg} — 5 sec me restart ho raha hai...")
             time.sleep(5)
             continue

@@ -1,5 +1,7 @@
 import threading
 import asyncio
+import hashlib
+import hmac
 import io
 import json
 import os
@@ -7,6 +9,7 @@ import random
 import time
 import datetime
 from urllib.parse import quote
+import requests
 import telebot
 from telebot import types
 from telethon import TelegramClient, events
@@ -59,6 +62,17 @@ PLANS = {
     "p49": {"price": 49, "days": 35, "label": "₹49 → 35 days"},
     "p99": {"price": 99, "days": 99, "label": "₹99 → 99 days"},
 }
+
+# ---- Razorpay (auto payment detection) ----
+# Dono keys set hain to payment AUTOMATIC verify hota hai (webhook + polling).
+# Keys nahi hain to bot purane manual flow (UPI QR + UTR approval) pe chalta hai.
+RAZORPAY_KEY_ID = os.environ.get('RAZORPAY_KEY_ID', '')
+RAZORPAY_KEY_SECRET = os.environ.get('RAZORPAY_KEY_SECRET', '')
+RAZORPAY_WEBHOOK_SECRET = os.environ.get('RAZORPAY_WEBHOOK_SECRET', '')
+AUTO_VERIFY = bool(RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET)
+RAZORPAY_API = "https://api.razorpay.com/v1"
+# Order kitni der tak poll kare (20 sec interval)
+PAYMENT_WATCH_MINUTES = int(os.environ.get('PAYMENT_WATCH_MINUTES', '20'))
 # ===================================================================
 
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -558,6 +572,175 @@ def upi_qr(amount, note):
     return buf
 
 
+# ---------- Razorpay helpers (auto verification) ----------
+def _rzp_auth():
+    return (RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET)
+
+
+def rzp_create_order(receipt, amount_paise, notes):
+    r = requests.post(
+        f"{RAZORPAY_API}/orders",
+        auth=_rzp_auth(),
+        json={
+            "amount": int(amount_paise),
+            "currency": "INR",
+            "receipt": str(receipt),
+            "notes": notes,
+        },
+        timeout=20,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def rzp_create_qr(receipt, amount_paise, description, notes):
+    r = requests.post(
+        f"{RAZORPAY_API}/payments/qr_codes",
+        auth=_rzp_auth(),
+        json={
+            "type": "upi_qr",
+            "name": UPI_NAME,
+            "usage": "single_use",
+            "fixed_amount": True,
+            "payment_amount": int(amount_paise),
+            "description": description,
+            "notes": notes,
+            "close_by": int(time.time()) + 3600,
+        },
+        timeout=20,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def rzp_order_status(rzp_order_id):
+    r = requests.get(
+        f"{RAZORPAY_API}/orders/{rzp_order_id}", auth=_rzp_auth(), timeout=20
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def rzp_qr_payments(qr_id):
+    r = requests.get(
+        f"{RAZORPAY_API}/payments/qr_codes/{qr_id}/payments",
+        auth=_rzp_auth(),
+        timeout=20,
+    )
+    r.raise_for_status()
+    return r.json()
+
+
+def _rzp_order_paid(order):
+    """Gateway se poochho ki paisa aaya ya nahi."""
+    if not AUTO_VERIFY:
+        return False
+
+    rzp_id = order.get("rzp_order_id")
+    if rzp_id:
+        try:
+            if rzp_order_status(rzp_id).get("status") == "paid":
+                return True
+        except Exception as e:
+            print(f"[rzp] order status fail: {e}")
+
+    qr_id = order.get("qr_id")
+    if qr_id:
+        try:
+            items = (rzp_qr_payments(qr_id) or {}).get("items") or []
+            if items:
+                return True
+        except Exception as e:
+            print(f"[rzp] qr payments fail: {e}")
+
+    return False
+
+
+def activate_order(order_id, source="auto"):
+    """Payment confirm — premium activate + user ko batao. Idempotent."""
+    order = store.get_order(order_id)
+    if not order:
+        print(f"[premium] activate: order {order_id} nahi mila")
+        return False
+    if order.get("status") == "approved":
+        return False
+    if order.get("status") == "cancelled":
+        print(f"[premium] activate: order {order_id} cancelled tha, skip")
+        return False
+
+    user_id = order.get("user_id")
+    until = grant_premium(user_id, int(order.get("days", 0)))
+    store.save_order(order_id, {
+        "status": "approved",
+        "approved_at": _now().isoformat(),
+        "source": source,
+    })
+    print(f"[premium] order {order_id} approved via {source} -> user {user_id}")
+
+    try:
+        bot.send_message(
+            user_id,
+            "✅ **Payment detected!**\n\n"
+            f"💎 Premium active: {until.strftime('%d %b %Y, %I:%M %p')} (UTC) tak\n"
+            f"🧾 Order: {order_id}\n\n"
+            "Ab unlimited downloads — enjoy! 🚀",
+            parse_mode="Markdown",
+        )
+    except Exception as e:
+        print(f"[premium] user notify fail: {e}")
+    return True
+
+
+def watch_payment(order_id):
+    """Background me payment check karta rehta hai (webhook na aaye to bhi)."""
+    def run():
+        rounds = max(1, (PAYMENT_WATCH_MINUTES * 60) // 20)
+        for _ in range(rounds):
+            time.sleep(20)
+            order = store.get_order(order_id)
+            if not order or order.get("status") in ("approved", "cancelled"):
+                return
+            if _rzp_order_paid(order):
+                activate_order(order_id, source="poll")
+                return
+        print(f"[rzp] order {order_id} watch timeout")
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _verify_webhook(body, signature):
+    if not RAZORPAY_WEBHOOK_SECRET:
+        print("[webhook] RAZORPAY_WEBHOOK_SECRET set nahi hai — request reject")
+        return False
+    expected = hmac.new(
+        RAZORPAY_WEBHOOK_SECRET.encode(), body, hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(expected, signature or "")
+
+
+def _handle_rzp_event(payload):
+    event = payload.get("event", "")
+    if event not in ("payment.captured", "order.paid", "qr_code.credited"):
+        print(f"[webhook] ignore event: {event}")
+        return
+
+    entities = payload.get("payload") or {}
+    notes = {}
+    for key in ("payment", "order", "qr_code"):
+        entity = ((entities.get(key) or {}).get("entity") or {})
+        if entity.get("notes"):
+            notes = entity["notes"]
+            break
+
+    order_id = str(notes.get("order_id") or "")
+    if not order_id:
+        print("[webhook] notes me order_id nahi mila")
+        return
+
+    print(f"[webhook] {event} -> order {order_id}")
+    activate_order(order_id, source=f"webhook:{event}")
+
+
 def plans_markup():
     markup = types.InlineKeyboardMarkup(row_width=1)
     for key, plan in PLANS.items():
@@ -663,6 +846,61 @@ def cb_pay(call):
     except Exception:
         pass
 
+    notes = {
+        "order_id": order_id,
+        "user_id": str(call.from_user.id),
+        "days": str(plan["days"]),
+    }
+
+    # ---- Auto mode: gateway QR banao, payment khud detect hoga ----
+    if AUTO_VERIFY:
+        try:
+            rzp_order = rzp_create_order(order_id, plan["price"] * 100, notes)
+            qr = rzp_create_qr(
+                order_id, plan["price"] * 100, f"Premium {order_id}", notes
+            )
+            store.save_order(order_id, {
+                "rzp_order_id": rzp_order.get("id"),
+                "qr_id": qr.get("id"),
+                "qr_image": qr.get("image_url"),
+            })
+
+            caption = (
+                "💎 **Premium Subscription Payment**\n\n"
+                f"💰 Amount: ₹{plan['price']}\n"
+                f"📅 Validity: {plan['days']} days\n"
+                f"🧾 Order ID: {order_id}\n\n"
+                "**Payment Instructions:**\n"
+                "1️⃣ Neeche wala QR kisi bhi UPI app se scan karo\n"
+                f"2️⃣ Exactly ₹{plan['price']} pay karo\n"
+                "3️⃣ Payment **automatically detect** ho jaayegi\n\n"
+                "⚡ Premium khud activate ho jaayega — screenshot bhejne ki zarurat nahi."
+            )
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            markup.add(types.InlineKeyboardButton(
+                "🔄 Check Payment", callback_data=f"checkpay:{order_id}"))
+            markup.add(types.InlineKeyboardButton(
+                "❌ CANCEL ORDER", callback_data=f"cancelorder:{order_id}"))
+
+            image = qr.get("image_url")
+            if image:
+                bot.send_photo(
+                    call.message.chat.id, image,
+                    caption=caption, reply_markup=markup, parse_mode="Markdown",
+                )
+            else:
+                bot.send_photo(
+                    call.message.chat.id,
+                    upi_qr(plan["price"], f"Premium {order_id}"),
+                    caption=caption, reply_markup=markup, parse_mode="Markdown",
+                )
+
+            watch_payment(order_id)
+            return
+        except Exception as e:
+            print(f"[rzp] auto order fail: {e} — manual flow pe fallback")
+
+    # ---- Manual fallback (gateway keys nahi hain ya API fail hui) ----
     caption = (
         "💎 **Premium Subscription Payment**\n\n"
         f"💰 Amount: ₹{plan['price']}\n"
@@ -693,6 +931,25 @@ def cb_pay(call):
             call.message.chat.id,
             caption + f"\n\nUPI ID: {UPI_ID}",
             reply_markup=markup,
+        )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("checkpay:"))
+def cb_checkpay(call):
+    order_id = call.data.split(":", 1)[1]
+    order = store.get_order(order_id)
+    if not order:
+        bot.answer_callback_query(call.id, "Order nahi mila.", show_alert=True)
+        return
+    if order.get("status") == "approved":
+        bot.answer_callback_query(call.id, "✅ Payment already verified!", show_alert=True)
+        return
+    if _rzp_order_paid(order):
+        activate_order(order_id, source="manual-check")
+        bot.answer_callback_query(call.id, "✅ Payment mil gaya! Premium active.", show_alert=True)
+    else:
+        bot.answer_callback_query(
+            call.id, "Abhi payment nahi mili. 30 second baad try karo.", show_alert=True
         )
 
 
@@ -1093,15 +1350,46 @@ def handle_delivery(message):
 # ================= DUMMY HTTP SERVER =================
 def run_dummy_server():
     from http.server import BaseHTTPRequestHandler, HTTPServer
-    class PingHandler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            self.send_response(200)
+
+    class Handler(BaseHTTPRequestHandler):
+        def _plain(self, code, text):
+            self.send_response(code)
             self.send_header('Content-type', 'text/plain')
             self.end_headers()
-            self.wfile.write(b"Bot is running!")
+            self.wfile.write(text.encode())
+
+        def do_GET(self):
+            self._plain(200, "Bot is running!")
+
+        def do_POST(self):
+            # Razorpay webhook endpoint
+            if self.path.split("?")[0] != "/razorpay-webhook":
+                self._plain(404, "not found")
+                return
+
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = 0
+            body = self.rfile.read(length) if length else b""
+            signature = self.headers.get("X-Razorpay-Signature", "")
+
+            if not _verify_webhook(body, signature):
+                self._plain(400, "invalid signature")
+                return
+
+            self._plain(200, "ok")
+            try:
+                _handle_rzp_event(json.loads(body or b"{}"))
+            except Exception as e:
+                print(f"[webhook] handle fail: {e}")
+
+        def log_message(self, *args):
+            pass
+
     try:
-        server = HTTPServer(('0.0.0.0', PORT), PingHandler)
-        print(f"Dummy HTTP server running on port {PORT}")
+        server = HTTPServer(('0.0.0.0', PORT), Handler)
+        print(f"HTTP server running on port {PORT} (webhook: /razorpay-webhook)")
         server.serve_forever()
     except OSError:
         pass

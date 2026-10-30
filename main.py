@@ -6,6 +6,7 @@ import io
 import json
 import os
 import random
+import re
 import time
 import datetime
 from urllib.parse import quote
@@ -52,6 +53,14 @@ SUPPORT_LINK = os.environ.get('SUPPORT_LINK', 'https://t.me/R0Y4L_KING')
 
 # Free users ke liye rozana download limit. 0 = unlimited (koi rok nahi)
 FREE_DAILY_LIMIT = int(os.environ.get('FREE_DAILY_LIMIT', '0'))
+
+# ---- Ads verification (shortener) ----
+# API key Render ke env me daalo: SHORTENER_API_KEY
+SHORTENER_ENDPOINT = os.environ.get('SHORTENER_ENDPOINT', 'https://vipshort.in/api')
+SHORTENER_API_KEY = os.environ.get('SHORTENER_API_KEY', '')
+FREE_TRIAL_DOWNLOADS = int(os.environ.get('FREE_TRIAL_DOWNLOADS', '3'))
+ADS_REWARD_DOWNLOADS = int(os.environ.get('ADS_REWARD_DOWNLOADS', '5'))
+VERIFY_TOKEN_TTL_MIN = int(os.environ.get('VERIFY_TOKEN_TTL_MIN', '60'))
 
 # Premium data: MongoDB (recommended) ya local JSON file
 MONGODB_URI = os.environ.get('MONGODB_URI', '')
@@ -130,7 +139,7 @@ try:
     print(f"Bot Username detected as: {MAIN_BOT_USERNAME}")
 except Exception as e:
     print(f"Error fetching bot username: {e}")
-    MAIN_BOT_USERNAME = "@YourBotUsername"
+    MAIN_BOT_USERNAME = os.environ.get('BOT_USERNAME', '') or "@YourBotUsername"
 
 loop = asyncio.new_event_loop()
 client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH, loop=loop)
@@ -463,8 +472,9 @@ class Store:
         self._users = None
         self._orders = None
         self._deletions = None
+        self._tokens = None
         self._path = json_path
-        self._data = {"users": {}, "orders": {}, "deletions": {}}
+        self._data = {"users": {}, "orders": {}, "deletions": {}, "tokens": {}}
 
         if mongo_uri and MongoClient:
             try:
@@ -477,6 +487,7 @@ class Store:
                 self._users = db["users"]
                 self._orders = db["orders"]
                 self._deletions = db["deletions"]
+                self._tokens = db["verify_tokens"]
                 print("[store] MongoDB connected")
                 return
             except Exception as e:
@@ -568,6 +579,34 @@ class Store:
             self._data.setdefault("deletions", {}).pop(key, None)
             self._save()
 
+    # ---- ad verification tokens ----
+    def add_token(self, token, doc):
+        if self._tokens is not None:
+            self._tokens.update_one({"_id": token}, {"$set": doc}, upsert=True)
+            return
+        with self._lock:
+            self._data.setdefault("tokens", {})[token] = doc
+            self._save()
+
+    def get_token(self, token):
+        if self._tokens is not None:
+            doc = self._tokens.find_one({"_id": token}) or {}
+            doc.pop("_id", None)
+            return doc
+        with self._lock:
+            return dict(self._data.get("tokens", {}).get(token, {}))
+
+    def use_token(self, token):
+        if self._tokens is not None:
+            self._tokens.update_one({"_id": token}, {"$set": {"used": True, "used_at": _now().isoformat()}})
+            return
+        with self._lock:
+            doc = self._data.setdefault("tokens", {}).get(token)
+            if doc:
+                doc["used"] = True
+                doc["used_at"] = _now().isoformat()
+                self._save()
+
 
 store = Store(MONGODB_URI, DB_PATH)
 
@@ -642,16 +681,162 @@ def bump_usage(user_id):
     )
 
 
-def download_allowed(user_id):
-    """(allowed, alert_text)"""
-    if is_premium(user_id) or FREE_DAILY_LIMIT <= 0:
-        return True, ""
-    if usage_today(user_id) >= FREE_DAILY_LIMIT:
-        return False, (
-            f"Aaj ki free limit ({FREE_DAILY_LIMIT} downloads) khatam ho gayi.\n"
-            "Unlimited ke liye /premium lo."
+def consume_download(user_id):
+    """Ek download consume karo. Returns (allowed, info).
+    info: 'premium' | 'credits' | 'free' | 'verify' | 'daily'
+    """
+    if is_premium(user_id):
+        bump_usage(user_id)
+        return True, "premium"
+
+    if FREE_DAILY_LIMIT > 0 and usage_today(user_id) >= FREE_DAILY_LIMIT:
+        return False, "daily"
+
+    user = store.get_user(user_id)
+    credits = int(user.get("credits", 0))
+    if credits > 0:
+        store.update_user(user_id, credits=credits - 1)
+        bump_usage(user_id)
+        return True, "credits"
+
+    free_used = int(user.get("free_used", 0))
+    if free_used < FREE_TRIAL_DOWNLOADS:
+        store.update_user(user_id, free_used=free_used + 1)
+        bump_usage(user_id)
+        return True, "free"
+
+    return False, "verify"
+
+
+def downloads_left_text(user_id):
+    if is_premium(user_id):
+        return "Unlimited (Premium)"
+    user = store.get_user(user_id)
+    credits = int(user.get("credits", 0))
+    free_used = int(user.get("free_used", 0))
+    free_left = max(0, FREE_TRIAL_DOWNLOADS - free_used)
+    if credits > 0:
+        return f"{credits} (ad-verified) + {free_left} free"
+    return f"{free_left} free"
+
+
+# ---------- Ads verification (shortlink) ----------
+def make_short_link(dest_url, alias=None):
+    """Shortener se chhota link banao. Fail ho to None."""
+    if not SHORTENER_API_KEY:
+        print("[ads] SHORTENER_API_KEY set nahi hai — seedha link use hoga")
+        return None
+
+    params = {"api": SHORTENER_API_KEY, "url": dest_url}
+    if alias:
+        params["alias"] = alias
+
+    try:
+        r = requests.get(SHORTENER_ENDPOINT, params=params, timeout=20)
+        r.raise_for_status()
+        text = (r.text or "").strip()
+        if text.startswith("http"):
+            return text
+        try:
+            data = r.json()
+        except Exception:
+            data = {}
+        for key in ("shortenedUrl", "shorturl", "short_url", "url", "link"):
+            if data.get(key):
+                return data[key]
+        print(f"[ads] shortener response samajh nahi aaya: {text[:200]}")
+    except Exception as e:
+        print(f"[ads] shortener fail: {e}")
+    return None
+
+
+def create_verify_link(user_id):
+    """Ad verification ka link banao (Telegram deep-link ko shorten karke)."""
+    token = "".join(random.choices("abcdefghijklmnopqrstuvwxyz0123456789", k=10))
+    store.add_token(token, {
+        "token": token,
+        "user_id": int(user_id),
+        "created": _now().isoformat(),
+        "used": False,
+    })
+    bot_username = MAIN_BOT_USERNAME.lstrip("@")
+    dest = f"https://t.me/{bot_username}?start=verify_{token}"
+    short = make_short_link(dest, alias=None)
+    if short:
+        print(f"[ads] verify link for {user_id}: {short}")
+        return short, token
+    return dest, token
+
+
+def handle_verify_payload(message, token):
+    """Ads dekhne ke baad user /start verify_<token> se aata hai."""
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+    doc = store.get_token(token)
+
+    if not doc:
+        bot.send_message(
+            chat_id,
+            "❌ Ye verification link valid nahi hai. /verify se naya link banao.",
         )
-    return True, ""
+        return
+
+    if doc.get("used"):
+        bot.send_message(
+            chat_id, "❌ Ye link pehle use ho chuka hai. /verify se naya link banao."
+        )
+        return
+
+    if int(doc.get("user_id", 0)) != user_id:
+        bot.send_message(
+            chat_id, "❌ Ye link kisi aur user ka hai. /verify se apna link banao."
+        )
+        return
+
+    try:
+        created = datetime.datetime.fromisoformat(str(doc.get("created")))
+    except Exception:
+        created = _now()
+    if (_now() - created) > datetime.timedelta(minutes=VERIFY_TOKEN_TTL_MIN):
+        bot.send_message(
+            chat_id, "⌛ Ye link expire ho gaya. /verify se naya link banao."
+        )
+        return
+
+    store.use_token(token)
+    user = store.get_user(user_id)
+    new_credits = int(user.get("credits", 0)) + ADS_REWARD_DOWNLOADS
+    store.update_user(user_id, credits=new_credits)
+
+    bot.send_message(
+        chat_id,
+        "✅ **Verification complete!**\n\n"
+        f"🎁 Aapko {ADS_REWARD_DOWNLOADS} downloads mil gaye.\n"
+        f"📥 Ab aapke paas total **{new_credits}** ad-verified downloads hain.\n\n"
+        "Ab apna Faphouse link bhejo! 🚀",
+        reply_markup=get_main_keyboard(),
+        parse_mode="Markdown",
+    )
+
+
+@bot.message_handler(commands=['verify'])
+def verify_command(message):
+    user_id = message.from_user.id
+    if is_premium(user_id):
+        bot.send_message(
+            message.chat.id, "💎 Aap Premium user ho — unlimited downloads, koi ads nahi!"
+        )
+        return
+    link, _ = create_verify_link(user_id)
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(types.InlineKeyboardButton("🔓 Verify Now (Ads)", url=link))
+    bot.send_message(
+        message.chat.id,
+        f"🔓 **Ad Verification**\n\n"
+        f"Link kholo, ads complete karo, phir {ADS_REWARD_DOWNLOADS} downloads milenge.",
+        reply_markup=markup,
+        parse_mode="Markdown",
+    )
 
 
 def upi_qr(amount, note):
@@ -911,6 +1096,7 @@ def cb_premium_menu(call):
 
 @bot.callback_query_handler(func=lambda call: call.data == "premium_cancel")
 def cb_premium_cancel(call):
+    awaiting_utr.pop(call.from_user.id, None)
     bot.answer_callback_query(call.id, "Cancel ho gaya.")
     try:
         bot.delete_message(call.message.chat.id, call.message.message_id)
@@ -1138,6 +1324,7 @@ def cb_cancel_order(call):
         bot.delete_message(call.message.chat.id, call.message.message_id)
     except Exception:
         pass
+    awaiting_utr.pop(call.from_user.id, None)
     bot.send_message(
         call.message.chat.id,
         "❌ Payment process cancelled. Naya order start karne ke liye /premium bhejo.",
@@ -1153,7 +1340,7 @@ def cb_paid(call):
             call.id, "Ye order valid nahi hai. /premium se naya order banao.", show_alert=True
         )
         return
-    awaiting_utr[call.from_user.id] = order_id
+    awaiting_utr[call.from_user.id] = (order_id, time.time())
     bot.answer_callback_query(call.id)
     bot.send_message(
         call.message.chat.id,
@@ -1163,10 +1350,33 @@ def cb_paid(call):
     )
 
 
-@bot.message_handler(content_types=['photo', 'text'], func=lambda m: m.from_user.id in awaiting_utr)
+def _looks_like_proof(message):
+    """Sirf real proof (photo ya UTR jaisa text) accept karo —
+    buttons/commands ko UTR mat samajho."""
+    if getattr(message, "photo", None):
+        return True
+    text = (message.text or "").strip()
+    if not text or text.startswith("/"):
+        return False
+    if text in ("📥 Download", "📊 Status", "💎 Premium"):
+        return False
+    return bool(re.fullmatch(r"[A-Za-z0-9]{8,22}", text))
+
+
+@bot.message_handler(
+    content_types=['photo', 'text'],
+    func=lambda m: m.from_user.id in awaiting_utr and _looks_like_proof(m),
+)
 def handle_utr(message):
-    order_id = awaiting_utr.pop(message.from_user.id, None)
-    if not order_id:
+    saved = awaiting_utr.pop(message.from_user.id, None)
+    if not saved:
+        return
+    order_id, started_at = saved
+    if time.time() - started_at > 15 * 60:
+        bot.send_message(
+            message.chat.id,
+            "⌛ Proof bhejne ka time nikal gaya. 'Send Payment Proof' dobara dabao.",
+        )
         return
     order = store.get_order(order_id)
     if not order:
@@ -1329,6 +1539,12 @@ def get_main_keyboard():
 
 @bot.message_handler(commands=['start'])
 def start_command(message):
+    parts = (message.text or "").split(maxsplit=1)
+    payload = parts[1].strip() if len(parts) > 1 else ""
+    if payload.startswith("verify_"):
+        handle_verify_payload(message, payload[len("verify_"):])
+        return
+
     asyncio.run_coroutine_threadsafe(_send_start_to_target(), loop)
 
     welcome_text = (
@@ -1346,7 +1562,12 @@ def start_command(message):
         reply_markup=get_main_keyboard(),
         parse_mode="Markdown"
     )
-    bot.send_message(message.chat.id, "👇 Apna Faphouse link bhejo boss!")
+    bot.send_message(
+        message.chat.id,
+        f"🎁 Pehle {FREE_TRIAL_DOWNLOADS} videos free! Uske baad ads verify karke "
+        f"{ADS_REWARD_DOWNLOADS} aur downloads — ya /premium se unlimited.\n\n"
+        "👇 Apna Faphouse link bhejo boss!",
+    )
 
 @bot.message_handler(func=lambda msg: msg.text == "📥 Download")
 def handle_download_btn(message):
@@ -1385,6 +1606,7 @@ def handle_status_btn(message):
         "👤 **Aapka Profile:**\n"
         f"🏷 **Plan:** {plan_line}\n"
         f"📥 **Aaj ke downloads:** {usage_line}\n"
+        f"🎁 **Downloads left:** {downloads_left_text(uid)}\n"
         f"✅ **Total Downloads:** {int(user.get('total_downloads', 0))}\n\n"
         "💡 _Download atak gaya? /cancel bhejo — sab reset!_"
     )
@@ -1424,11 +1646,34 @@ def process_download(call):
         
     url = user_requests[chat_id]
     
-    allowed, why = download_allowed(chat_id)
+    allowed, info = consume_download(chat_id)
     if not allowed:
-        bot.answer_callback_query(call.id, why, show_alert=True)
+        if info == "verify":
+            link, _ = create_verify_link(chat_id)
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            markup.add(types.InlineKeyboardButton("🔓 Verify Now (Ads)", url=link))
+            markup.add(types.InlineKeyboardButton(
+                "💎 Go Premium (Unlimited)", callback_data="premium_menu"))
+            try:
+                bot.answer_callback_query(call.id, "Verification required", show_alert=False)
+            except Exception:
+                pass
+            bot.send_message(
+                chat_id,
+                f"🔒 **Aapke {FREE_TRIAL_DOWNLOADS} free videos khatam ho gaye!**\n\n"
+                "Neeche wale link se ads complete karo aur "
+                f"**{ADS_REWARD_DOWNLOADS} aur downloads** paao.\n\n"
+                "⚡ Ya phir Premium lo — unlimited, bina ads.",
+                reply_markup=markup,
+                parse_mode="Markdown",
+            )
+        else:
+            bot.answer_callback_query(
+                call.id,
+                f"Aaj ki free limit ({FREE_DAILY_LIMIT}) khatam. /premium lo.",
+                show_alert=True,
+            )
         return
-    bump_usage(chat_id)
 
     plan_markup = types.InlineKeyboardMarkup()
     plan_markup.add(types.InlineKeyboardButton("💎 Buy Premium - No Waiting!", callback_data="premium_menu"))

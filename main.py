@@ -58,6 +58,10 @@ FREE_DAILY_LIMIT = int(os.environ.get('FREE_DAILY_LIMIT', '0'))
 # API key Render ke env me daalo: SHORTENER_API_KEY
 SHORTENER_ENDPOINT = os.environ.get('SHORTENER_ENDPOINT', 'https://vipshort.in/api')
 SHORTENER_API_KEY = os.environ.get('SHORTENER_API_KEY', '')
+# Anti-bypass gateway: apna public URL (Render URL). Set hone par bot apna
+# /r/<token> link deta hai, shortener link user ko kabhi nahi dikhta.
+PUBLIC_URL = os.environ.get('PUBLIC_URL', '').rstrip('/')
+VERIFY_LINK_MODE = os.environ.get('VERIFY_LINK_MODE', 'page_first').strip().lower()
 FREE_TRIAL_DOWNLOADS = int(os.environ.get('FREE_TRIAL_DOWNLOADS', '3'))
 ADS_REWARD_DOWNLOADS = int(os.environ.get('ADS_REWARD_DOWNLOADS', '5'))
 VERIFY_TOKEN_TTL_MIN = int(os.environ.get('VERIFY_TOKEN_TTL_MIN', '60'))
@@ -133,6 +137,22 @@ PAYMENT_WATCH_MINUTES = int(os.environ.get('PAYMENT_WATCH_MINUTES', '20'))
 # ===================================================================
 
 bot = telebot.TeleBot(BOT_TOKEN)
+
+# Callback answer kabhi exception na de — warna button tap hone par kuch
+# hota dikh nahi (purana query timeout ho jaati hai).
+_real_answer_callback = bot.answer_callback_query
+
+
+def _safe_answer_callback(callback_query_id, text=None, show_alert=False, **kwargs):
+    try:
+        return _real_answer_callback(
+            callback_query_id, text=text, show_alert=show_alert, **kwargs
+        )
+    except Exception as e:
+        print(f"[callback] answer fail: {e}")
+
+
+bot.answer_callback_query = _safe_answer_callback
 
 try:
     MAIN_BOT_USERNAME = f"@{bot.get_me().username}"
@@ -311,7 +331,8 @@ async def _send_start_to_target():
     except Exception as e:
         pass
 
-async def _fetch_from_target(url, user_chat_id, call_msg_id):
+async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
+    """refund_kind: agar download fail ho to credit/free download wapas karne ke liye."""
     target_entity = await client.get_entity(TARGET_BOT)
     main_bot_entity = await client.get_entity(MAIN_BOT_USERNAME)
     
@@ -338,10 +359,12 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id):
             # ---> CASE A: Target bot ne ERROR de diya <---
             if msg.text and "ek link fir se bhejo" in msg.text.lower():
                 print("[telethon] Target bot fail ho gaya (Error message mila).")
+                refund_download(user_chat_id, refund_kind)
                 _edit(
                     user_chat_id,
                     call_msg_id,
-                    "❌ **Download Failed!**\n\nTarget server par issue hai. Kripya koi dusra link try karein.",
+                    "❌ **Download Failed!**\n\nTarget server par issue hai. Kripya koi dusra link try karein.\n\n"
+                    "_(Aapka download credit wapas kar diya gaya hai.)_",
                 )
                 return False
 
@@ -436,10 +459,12 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id):
                         if clicked: break
                 
     print("[telethon] Error: Video aane me timeout ho gaya.")
+    refund_download(user_chat_id, refund_kind)
     _edit(
         user_chat_id,
         call_msg_id,
-        "❌ **Timeout Error**\n\nVideo download hone me bohot zyada time lag gaya. Please try again later.",
+        "❌ **Timeout Error**\n\nVideo download hone me bohot zyada time lag gaya. Please try again later.\n\n"
+        "_(Aapka download credit wapas kar diya gaya hai.)_",
     )
     return False
 
@@ -596,6 +621,24 @@ class Store:
         with self._lock:
             return dict(self._data.get("tokens", {}).get(token, {}))
 
+    def update_token(self, token, **fields):
+        if self._tokens is not None:
+            self._tokens.update_one({"_id": token}, {"$set": fields})
+            return
+        with self._lock:
+            doc = self._data.setdefault("tokens", {}).get(token)
+            if doc:
+                doc.update(fields)
+                self._save()
+
+    def delete_token(self, token):
+        if self._tokens is not None:
+            self._tokens.delete_one({"_id": token})
+            return
+        with self._lock:
+            self._data.setdefault("tokens", {}).pop(token, None)
+            self._save()
+
     def use_token(self, token):
         if self._tokens is not None:
             self._tokens.update_one({"_id": token}, {"$set": {"used": True, "used_at": _now().isoformat()}})
@@ -681,6 +724,27 @@ def bump_usage(user_id):
     )
 
 
+def refund_download(user_id, kind):
+    """Download fail ho gaya to jo consume hua tha wo wapas karo."""
+    if kind not in ("free", "credits"):
+        return
+
+    user = store.get_user(user_id)
+    fields = {}
+
+    if kind == "free":
+        fields["free_used"] = max(0, int(user.get("free_used", 0)) - 1)
+    elif kind == "credits":
+        fields["credits"] = int(user.get("credits", 0)) + 1
+
+    # stats bhi wapas
+    fields["usage_count"] = max(0, int(user.get("usage_count", 0)) - 1)
+    fields["total_downloads"] = max(0, int(user.get("total_downloads", 0)) - 1)
+
+    store.update_user(user_id, **fields)
+    print(f"[refund] {user_id} ka {kind} download wapas kiya")
+
+
 def consume_download(user_id):
     """Ek download consume karo. Returns (allowed, info).
     info: 'premium' | 'credits' | 'free' | 'verify' | 'daily'
@@ -751,21 +815,45 @@ def make_short_link(dest_url, alias=None):
 
 
 def create_verify_link(user_id):
-    """Ad verification ka link banao (Telegram deep-link ko shorten karke)."""
-    token = "".join(random.choices("abcdefghijklmnopqrstuvwxyz0123456789", k=10))
+    """Ad verification link banao.
+
+    Anti-bypass: PUBLIC_URL set hai to bot apna gateway link deta hai
+    (https://<app>/r/<token>) — shortener link user ko dikhta hi nahi, isliye
+    wo kisi bypass bot ko de nahi sakta. Gateway page pehle checks chalata hai,
+    phir ad pe bhejta hai, aur tabhi token 'gateway_passed' hota hai.
+    Fail hone par None return — bypass kabhi nahi milta (fail closed).
+    """
+    token = "".join(random.choices("abcdefghijklmnopqrstuvwxyz0123456789", k=20))
+    bot_username = MAIN_BOT_USERNAME.lstrip("@")
+    deep_link = f"https://t.me/{bot_username}?start=verify_{token}"
+    require_gateway = bool(PUBLIC_URL)
+
     store.add_token(token, {
         "token": token,
         "user_id": int(user_id),
         "created": _now().isoformat(),
+        "created_ts": int(time.time()),
         "used": False,
+        "link_used": False,
+        "gateway_passed": False,
+        "require_gateway": require_gateway,
     })
-    bot_username = MAIN_BOT_USERNAME.lstrip("@")
-    dest = f"https://t.me/{bot_username}?start=verify_{token}"
-    short = make_short_link(dest, alias=None)
-    if short:
-        print(f"[ads] verify link for {user_id}: {short}")
-        return short, token
-    return dest, token
+
+    if require_gateway:
+        gateway_url = f"{PUBLIC_URL}/r/{token}"
+        if VERIFY_LINK_MODE == "page_first":
+            ad_link = make_short_link(deep_link)
+            if not ad_link:
+                store.delete_token(token)
+                print("[ads] ad link fail — verification blocked (fail closed)")
+                return None, token
+            store.update_token(token, ad_link=ad_link)
+        print(f"[ads] gateway link for {user_id}: {gateway_url} ({VERIFY_LINK_MODE})")
+        return gateway_url, token
+
+    print("[ads] PUBLIC_URL set nahi hai — gateway off (bypass possible)")
+    short = make_short_link(deep_link)
+    return (short or deep_link), token
 
 
 def handle_verify_payload(message, token):
@@ -793,11 +881,16 @@ def handle_verify_payload(message, token):
         )
         return
 
-    try:
-        created = datetime.datetime.fromisoformat(str(doc.get("created")))
-    except Exception:
-        created = _now()
-    if (_now() - created) > datetime.timedelta(minutes=VERIFY_TOKEN_TTL_MIN):
+    if doc.get("require_gateway") and not doc.get("gateway_passed"):
+        bot.send_message(
+            chat_id,
+            "❌ Ye link gateway se verify nahi hua.\n\n"
+            "Bot ke 'Verify Now' button se naya link lo aur use hi kholo.",
+        )
+        return
+
+    created_ts = int(doc.get("created_ts", 0) or 0)
+    if created_ts and (time.time() - created_ts) > VERIFY_TOKEN_TTL_MIN * 60:
         bot.send_message(
             chat_id, "⌛ Ye link expire ho gaya. /verify se naya link banao."
         )
@@ -828,12 +921,19 @@ def verify_command(message):
         )
         return
     link, _ = create_verify_link(user_id)
+    if not link:
+        bot.send_message(
+            message.chat.id,
+            "⚠️ **Verification abhi available nahi hai.** Thodi der baad try karo.",
+            parse_mode="Markdown",
+        )
+        return
     markup = types.InlineKeyboardMarkup(row_width=1)
     markup.add(types.InlineKeyboardButton("🔓 Verify Now (Ads)", url=link))
     bot.send_message(
         message.chat.id,
         f"🔓 **Ad Verification**\n\n"
-        f"Link kholo, ads complete karo, phir {ADS_REWARD_DOWNLOADS} downloads milenge.",
+        f"Link kholo, checks complete karo, phir {ADS_REWARD_DOWNLOADS} downloads milenge.",
         reply_markup=markup,
         parse_mode="Markdown",
     )
@@ -1615,90 +1715,78 @@ def handle_status_btn(message):
     
     bot.send_message(message.chat.id, text, reply_markup=markup, parse_mode="Markdown")
 
-@bot.message_handler(func=lambda msg: "http" in msg.text)
-def handle_faphouse_link(message):
-    user_requests[message.chat.id] = message.text
-    
+def send_verify_gate(chat_id, reason="verify"):
+    """Ads gate ka screen bhejo. Link na bane to fail-closed message."""
+    link, _ = create_verify_link(chat_id)
+    if not link:
+        bot.send_message(
+            chat_id,
+            "⚠️ **Verification abhi available nahi hai.**\n\n"
+            "Thodi der baad link dobara bhejo.",
+            parse_mode="Markdown",
+        )
+        return
+
     markup = types.InlineKeyboardMarkup(row_width=1)
-    markup.add(types.InlineKeyboardButton("🚀 Open in TeraPlay", url=TERAPLAY_LINK))
-    markup.add(types.InlineKeyboardButton("📥 Download Video on Telegram", callback_data="download_video"))
-    
-    bot.send_message(
-        message.chat.id,
-        "**▶️ Any Play**\n"
-        "**Stream Any Video Easily**\n\n"
-        "⚡ Faster streaming\n"
-        "📺 Better viewing experience\n"
-        "✨ Smooth playback inside the app\n\n"
-        "**Highly recommended:** tap **Open in TeraPlay** to watch in the app.\n\n"
-        "📥 If you want to download the video on Telegram instead, tap **Download Video on Telegram**.",
-        reply_markup=markup,
-        parse_mode="Markdown"
-    )
+    markup.add(types.InlineKeyboardButton("🔓 Verify Now (Ads)", url=link))
+    markup.add(types.InlineKeyboardButton(
+        "💎 Go Premium (Unlimited)", callback_data="premium_menu"))
+
+    if reason == "daily":
+        text = f"🔒 **Aaj ki free limit ({FREE_DAILY_LIMIT}) khatam.**\n\n" \
+               "Ads verify karke aur downloads paao, ya Premium lo."
+    else:
+        text = (
+            f"🔒 **Aapke {FREE_TRIAL_DOWNLOADS} free videos khatam ho gaye!**\n\n"
+            "Neeche wale link se ads complete karo aur "
+            f"**{ADS_REWARD_DOWNLOADS} aur downloads** paao.\n\n"
+            "⚡ Ya phir Premium lo — unlimited, bina ads."
+        )
+    bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")
+
+
+def begin_download(chat_id, url=None):
+    """Link milte hi seedha loading screen + download shuru."""
+    if url:
+        user_requests[chat_id] = url
+    url = user_requests.get(chat_id)
+    if not url:
+        bot.send_message(chat_id, "Pehle apna Faphouse link bhejo.")
+        return
+
+    allowed, info = consume_download(chat_id)
+    if not allowed:
+        send_verify_gate(chat_id, reason=info)
+        return
+
+    try:
+        msg = bot.send_message(
+            chat_id,
+            SPINNER_TEXT.format(bar=BAR_FRAMES[0]),
+            parse_mode="Markdown",
+        )
+        status_id = msg.message_id
+    except Exception as e:
+        print(f"[download] status msg fail: {e}")
+        return
+
+    start_spinner(chat_id, status_id)
+    with processing_lock:
+        asyncio.run_coroutine_threadsafe(
+            _fetch_from_target(url, chat_id, status_id, refund_kind=info), loop
+        )
+
+
+@bot.message_handler(func=lambda msg: msg.text and "http" in msg.text)
+def handle_faphouse_link(message):
+    begin_download(message.chat.id, message.text.strip())
+
 
 @bot.callback_query_handler(func=lambda call: call.data == "download_video")
 def process_download(call):
-    chat_id = call.message.chat.id
-    
-    if chat_id not in user_requests:
-        bot.answer_callback_query(call.id, "❌ Link expire ho gaya hai, wapas link bhejein.", show_alert=True)
-        return
-        
-    url = user_requests[chat_id]
-    
-    allowed, info = consume_download(chat_id)
-    if not allowed:
-        if info == "verify":
-            link, _ = create_verify_link(chat_id)
-            markup = types.InlineKeyboardMarkup(row_width=1)
-            markup.add(types.InlineKeyboardButton("🔓 Verify Now (Ads)", url=link))
-            markup.add(types.InlineKeyboardButton(
-                "💎 Go Premium (Unlimited)", callback_data="premium_menu"))
-            try:
-                bot.answer_callback_query(call.id, "Verification required", show_alert=False)
-            except Exception:
-                pass
-            bot.send_message(
-                chat_id,
-                f"🔒 **Aapke {FREE_TRIAL_DOWNLOADS} free videos khatam ho gaye!**\n\n"
-                "Neeche wale link se ads complete karo aur "
-                f"**{ADS_REWARD_DOWNLOADS} aur downloads** paao.\n\n"
-                "⚡ Ya phir Premium lo — unlimited, bina ads.",
-                reply_markup=markup,
-                parse_mode="Markdown",
-            )
-        else:
-            bot.answer_callback_query(
-                call.id,
-                f"Aaj ki free limit ({FREE_DAILY_LIMIT}) khatam. /premium lo.",
-                show_alert=True,
-            )
-        return
-
-    plan_markup = types.InlineKeyboardMarkup()
-    plan_markup.add(types.InlineKeyboardButton("💎 Buy Premium - No Waiting!", callback_data="premium_menu"))
-    
-    try:
-        bot.answer_callback_query(call.id, "⏳ Download shuru ho raha hai...")
-    except Exception:
-        pass
-
-    try:
-        bot.edit_message_text(
-            SPINNER_TEXT.format(bar=BAR_FRAMES[0]),
-            chat_id=chat_id,
-            message_id=call.message.message_id,
-            reply_markup=plan_markup,
-            parse_mode="Markdown",
-        )
-    except Exception as e:
-        print(f"Edit msg error: {e}")
-
-    # Loading animation chalu — koi bhi agla update isse khud rok dega
-    start_spinner(chat_id, call.message.message_id)
-
-    with processing_lock:
-        asyncio.run_coroutine_threadsafe(_fetch_from_target(url, chat_id, call.message.message_id), loop)
+    """Purane messages ke buttons ke liye (ab naye flow me use nahi hota)."""
+    bot.answer_callback_query(call.id, "⏳ Download shuru ho raha hai...")
+    begin_download(call.message.chat.id)
 
 
 # ================= INTERNAL ROUTING =================
@@ -1768,9 +1856,108 @@ def handle_delivery(message):
         print(f"❌ Fatal Route Error: {e}")
 
 
-# ================= DUMMY HTTP SERVER =================
+# ================= ANTI-BYPASS GATEWAY + HTTP SERVER =================
+GATEWAY_PAGE = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Security Check</title>
+<style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+font-family:Inter,system-ui,-apple-system,sans-serif;background:linear-gradient(135deg,#667eea,#764ba2);padding:16px}
+.card{background:#fff;border-radius:20px;padding:26px 22px;max-width:400px;width:100%;
+box-shadow:0 18px 40px rgba(0,0,0,.18)}
+h1{font-size:20px;margin:0 0 6px;color:#1f2937}
+p{color:#4b5563;font-size:14px;margin:0 0 16px}
+ul{list-style:none;padding:0;margin:0}
+li{font-size:14px;color:#6b7280;padding:7px 0}
+li.ok{color:#059669}
+.err{color:#dc2626;font-weight:600;font-size:14px}
+</style></head>
+<body><div class="card">
+<h1>\U0001F512 Security Check</h1>
+<p>Please wait, verifying your browser\u2026</p>
+<ul id="steps"></ul>
+<p id="status" style="margin-top:14px"></p>
+</div>
+<script>
+(function(){
+  var token = "__TOKEN__";
+  var names = ["Browser check", "Automation check", "Device check", "Finalizing"];
+  var list = document.getElementById("steps");
+  var status = document.getElementById("status");
+  function add(name){ var li=document.createElement("li"); li.textContent="\u23F3 "+name; list.appendChild(li); return li; }
+  var ua = navigator.userAgent || "";
+  var items = names.map(add);
+  var envOk = !!ua && typeof window.fetch === "function";
+  var wd = (navigator.webdriver === true) || /HeadlessChrome|PhantomJS|Selenium|puppeteer|playwright/i.test(ua);
+  setTimeout(function(){
+    items[0].textContent = (envOk?"\u2705 ":"\u274C ") + names[0]; items[0].className = envOk?"ok":"";
+    items[1].textContent = (wd?"\u274C ":"\u2705 ") + names[1]; items[1].className = wd?"":"ok";
+    items[2].textContent = "\u2705 " + names[2]; items[2].className = "ok";
+    items[3].textContent = "\u2705 " + names[3]; items[3].className = "ok";
+    if(!envOk || wd){
+      status.innerHTML = '<span class="err">Verification failed. Bot se link dobara lo.</span>';
+      return;
+    }
+    fetch("/r/" + encodeURIComponent(token) + "/go", {method:"POST"})
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        if(d && d.ok && d.url){ window.location.replace(d.url); }
+        else { status.innerHTML = '<span class="err">' + ((d && d.error) || "Verification failed.") + '</span>'; }
+      })
+      .catch(function(){ status.innerHTML = '<span class="err">Network error. Please try again.</span>'; });
+  }, 1800);
+})();
+</script></body></html>"""
+
+GATEWAY_EXPIRED_PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Link Expired</title></head>
+<body style="font-family:system-ui,sans-serif;padding:40px;text-align:center;color:#374151">
+<h2>\u231B Link expired or already used</h2>
+<p>Bot me wapas jaake <b>Verify Now</b> dabao aur naya link lo.</p>
+</body></html>"""
+
+
+def _gateway_token_check(token):
+    doc = store.get_token(token)
+    if not doc:
+        return False, "invalid"
+    if doc.get("used") or doc.get("link_used"):
+        return False, "already used"
+    created_ts = int(doc.get("created_ts", 0) or 0)
+    if created_ts and (time.time() - created_ts) > VERIFY_TOKEN_TTL_MIN * 60:
+        return False, "expired"
+    return True, ""
+
+
+def _gateway_go(token):
+    """Checks pass — token ko gateway_passed mark karo aur aage ka link do."""
+    ok, why = _gateway_token_check(token)
+    if not ok:
+        print(f"[gateway] blocked token={token[:6]}... ({why})")
+        return {"ok": False, "error": f"Link {why}. Bot se naya link lo."}
+
+    doc = store.get_token(token)
+    store.update_token(
+        token, gateway_passed=True, link_used=True, link_used_ts=int(time.time())
+    )
+    print(f"[gateway] passed token={token[:6]}... mode={VERIFY_LINK_MODE}")
+
+    if VERIFY_LINK_MODE == "page_first":
+        ad_link = doc.get("ad_link")
+        if not ad_link:
+            return {"ok": False, "error": "Ad step ready nahi hai. Thodi der baad try karo."}
+        return {"ok": True, "url": ad_link}
+
+    return {
+        "ok": True,
+        "url": f"https://t.me/{MAIN_BOT_USERNAME.lstrip('@')}?start=verify_{token}",
+    }
+
+
 def run_dummy_server():
     from http.server import BaseHTTPRequestHandler, HTTPServer
+    from urllib.parse import urlparse
 
     class Handler(BaseHTTPRequestHandler):
         def _plain(self, code, text):
@@ -1779,12 +1966,47 @@ def run_dummy_server():
             self.end_headers()
             self.wfile.write(text.encode())
 
+        def _html(self, code, html):
+            self.send_response(code)
+            self.send_header('Content-type', 'text/html; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(html.encode())
+
+        def _json(self, code, obj):
+            self.send_response(code)
+            self.send_header('Content-type', 'application/json')
+            self.end_headers()
+            self.wfile.write(json.dumps(obj).encode())
+
         def do_GET(self):
+            path = urlparse(self.path).path
+            parts = [p for p in path.split("/") if p]
+
+            if parts and parts[0] in ("r", "v") and len(parts) >= 2:
+                token = parts[1]
+                if len(parts) >= 3 and parts[2] == "go":
+                    self._json(200, _gateway_go(token))
+                    return
+                ok, _why = _gateway_token_check(token)
+                if not ok:
+                    self._html(410, GATEWAY_EXPIRED_PAGE)
+                    return
+                self._html(200, GATEWAY_PAGE.replace("__TOKEN__", token))
+                return
+
             self._plain(200, "Bot is running!")
 
         def do_POST(self):
-            # Razorpay webhook endpoint
-            if self.path.split("?")[0] != "/razorpay-webhook":
+            path = urlparse(self.path).path
+            parts = [p for p in path.split("/") if p]
+
+            # Anti-bypass gateway callback
+            if len(parts) >= 3 and parts[0] in ("r", "v") and parts[2] == "go":
+                self._json(200, _gateway_go(parts[1]))
+                return
+
+            # Razorpay webhook
+            if path != "/razorpay-webhook":
                 self._plain(404, "not found")
                 return
 
@@ -1810,7 +2032,10 @@ def run_dummy_server():
 
     try:
         server = HTTPServer(('0.0.0.0', PORT), Handler)
-        print(f"HTTP server running on port {PORT} (webhook: /razorpay-webhook)")
+        print(
+            f"HTTP server on port {PORT} | webhook /razorpay-webhook | "
+            f"gateway /r/<token> (mode={VERIFY_LINK_MODE}, PUBLIC_URL={'set' if PUBLIC_URL else 'MISSING'})"
+        )
         server.serve_forever()
     except OSError:
         pass

@@ -61,6 +61,14 @@ DB_PATH = os.environ.get('DB_PATH', 'premium_db.json')
 PAYMENT_PAGE_URL = os.environ.get(
     'PAYMENT_PAGE_URL', 'https://r0y4l-king.github.io/upi-pay/'
 )
+
+
+def payment_page_url(amount=None):
+    """UPI page ka link — amount diya to query me bhi jaayega (page auto-fill karta hai)."""
+    if not amount:
+        return PAYMENT_PAGE_URL
+    sep = "&" if "?" in PAYMENT_PAGE_URL else "?"
+    return f"{PAYMENT_PAGE_URL}{sep}pa={quote(UPI_ID)}&am={int(amount)}&pn={quote(UPI_NAME)}"
 PREMIUM_BANNER_URL = os.environ.get(
     'PREMIUM_BANNER_URL',
     'https://raw.githubusercontent.com/R0Y4L-KING/Useless/main/premium_banner.jpg',
@@ -271,19 +279,18 @@ def build_video_caption(sent):
 
 
 def schedule_auto_delete(chat_id, message_id, delay):
+    """Delete job DB me queue karo. Sweeper thread ise utha lega —
+    process restart / Render sleep ke baad bhi delete hona bacha rahega."""
     if delay <= 0:
         return
-
-    def job():
-        try:
-            bot.delete_message(chat_id, message_id)
-            print(f"[auto-delete] message {message_id} deleted")
-        except Exception as e:
-            print(f"[auto-delete] {e}")
-
-    t = threading.Timer(delay, job)
-    t.daemon = True
-    t.start()
+    key = f"{chat_id}:{message_id}"
+    store.add_deletion(key, {
+        "key": key,
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "delete_at": (_now() + datetime.timedelta(seconds=int(delay))).isoformat(),
+    })
+    print(f"[auto-delete] queued {key} (+{delay}s)")
 
 
 # ================= TELETHON SIDE (Userbot Relay) =================
@@ -444,6 +451,10 @@ except Exception:
     MongoClient = None
 
 
+def _now():
+    return datetime.datetime.utcnow()
+
+
 class Store:
     """Premium users + orders. MONGODB_URI ho to Mongo, warna local JSON."""
 
@@ -451,8 +462,9 @@ class Store:
         self._lock = threading.Lock()
         self._users = None
         self._orders = None
+        self._deletions = None
         self._path = json_path
-        self._data = {"users": {}, "orders": {}}
+        self._data = {"users": {}, "orders": {}, "deletions": {}}
 
         if mongo_uri and MongoClient:
             try:
@@ -464,6 +476,7 @@ class Store:
                     db = client["faphouse"]
                 self._users = db["users"]
                 self._orders = db["orders"]
+                self._deletions = db["deletions"]
                 print("[store] MongoDB connected")
                 return
             except Exception as e:
@@ -525,13 +538,60 @@ class Store:
     def set_order_status(self, order_id, status):
         self.save_order(order_id, {"status": status})
 
+    # ---- auto-delete queue ----
+    def add_deletion(self, key, doc):
+        if self._deletions is not None:
+            self._deletions.update_one({"_id": key}, {"$set": doc}, upsert=True)
+            return
+        with self._lock:
+            self._data.setdefault("deletions", {})[key] = doc
+            self._save()
+
+    def due_deletions(self, now_iso):
+        docs = []
+        if self._deletions is not None:
+            for doc in self._deletions.find({"delete_at": {"$lte": now_iso}}):
+                doc.pop("_id", None)
+                docs.append(doc)
+            return docs
+        with self._lock:
+            for doc in self._data.get("deletions", {}).values():
+                if str(doc.get("delete_at", "")) <= now_iso:
+                    docs.append(dict(doc))
+        return docs
+
+    def remove_deletion(self, key):
+        if self._deletions is not None:
+            self._deletions.delete_one({"_id": key})
+            return
+        with self._lock:
+            self._data.setdefault("deletions", {}).pop(key, None)
+            self._save()
+
 
 store = Store(MONGODB_URI, DB_PATH)
+
+
+def _deletion_sweeper():
+    """Har 60 second me due deletions delete karta hai."""
+    while True:
+        try:
+            now_iso = _now().isoformat()
+            for doc in store.due_deletions(now_iso):
+                key = doc.get("key") or f"{doc.get('chat_id')}:{doc.get('message_id')}"
+                try:
+                    bot.delete_message(doc["chat_id"], doc["message_id"])
+                    print(f"[auto-delete] deleted {key}")
+                except Exception as e:
+                    print(f"[auto-delete] {key} delete fail: {e}")
+                store.remove_deletion(key)
+        except Exception as e:
+            print(f"[auto-delete] sweep error: {e}")
+        time.sleep(60)
+
+
+threading.Thread(target=_deletion_sweeper, daemon=True).start()
 awaiting_utr = {}
-
-
-def _now():
-    return datetime.datetime.utcnow()
 
 
 def premium_until(user_id):
@@ -785,7 +845,7 @@ def plans_markup():
     markup = types.InlineKeyboardMarkup(row_width=1)
     for key, plan in PLANS.items():
         markup.add(types.InlineKeyboardButton(plan["label"], callback_data=f"plan:{key}"))
-    markup.add(types.InlineKeyboardButton("🌐 Pay Now (UPI)", url=PAYMENT_PAGE_URL))
+    markup.add(types.InlineKeyboardButton("🌐 Pay Now (UPI)", url=payment_page_url()))
     markup.add(types.InlineKeyboardButton("📲 Scan to Pay", callback_data="scanqr"))
     markup.add(types.InlineKeyboardButton("⬅️ Back to Home", callback_data="back_home"))
     return markup
@@ -971,7 +1031,8 @@ def start_payment(chat_id, user_id, key):
         "⚠️ Proof verify hone ke baad premium activate ho jaayega."
     )
     markup = types.InlineKeyboardMarkup(row_width=1)
-    markup.add(types.InlineKeyboardButton("🌐 Pay Now (UPI)", url=PAYMENT_PAGE_URL))
+    markup.add(types.InlineKeyboardButton(
+        "🌐 Pay Now (UPI)", url=payment_page_url(plan["price"])))
     markup.add(types.InlineKeyboardButton(
         "📲 Scan to Pay", callback_data=f"scanqr:{order_id}"))
     markup.add(types.InlineKeyboardButton(

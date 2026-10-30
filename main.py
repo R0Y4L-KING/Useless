@@ -15,7 +15,7 @@ BOT_TOKEN = os.environ.get('BOT_TOKEN', '')
 OWNER_ID = int(os.environ.get('OWNER_ID', ''))
 
 # Target Bot
-TARGET_BOT = os.environ.get('TARGET_BOT', '@FapHouseVideoDownloaderBot')
+TARGET_BOT = os.environ.get('TARGET_BOT', '@Doubtbustbot')
 
 # Custom Links
 TERAPLAY_LINK = "https://play.google.com/store/apps/details?id=in.shadowlink.anyplay"

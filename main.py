@@ -28,6 +28,14 @@ PORT = int(os.environ.get('PORT', '8080'))
 
 # Delivered video kitni der baad delete ho (seconds). 0 = kabhi delete nahi.
 AUTO_DELETE_SECONDS = int(os.environ.get('AUTO_DELETE_SECONDS', '3600'))
+
+# Video ka cover (poster image) — target bot ki branding hatane ke liye.
+# Koi bhi public JPEG URL chalega; default hamara repo wala cover hai.
+REPLACE_COVER = os.environ.get('REPLACE_COVER', '1') == '1'
+COVER_URL = os.environ.get(
+    'COVER_URL',
+    'https://raw.githubusercontent.com/R0Y4L-KING/Useless/main/cover.jpg',
+)
 # ===================================================================
 
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -495,17 +503,42 @@ def handle_delivery(message):
             reply_markup=markup
         )
 
-        # Target bot ka caption hata kar apna caption lagao
+        # Target bot ka caption + cover hata kar apna lagao
         caption = build_video_caption(sent)
-        try:
-            bot.edit_message_caption(
-                caption=caption,
-                chat_id=target_user_id,
-                message_id=sent.message_id,
-                reply_markup=markup
-            )
-        except Exception as e:
-            print(f"[caption] {e}")
+        media_edited = False
+
+        if REPLACE_COVER and COVER_URL and getattr(sent, "video", None):
+            try:
+                media = types.InputMediaVideo(
+                    media=sent.video.file_id,
+                    caption=caption,
+                    width=getattr(sent.video, "width", None),
+                    height=getattr(sent.video, "height", None),
+                    duration=getattr(sent.video, "duration", None),
+                    supports_streaming=True,
+                    cover=COVER_URL,
+                )
+                bot.edit_message_media(
+                    media=media,
+                    chat_id=target_user_id,
+                    message_id=sent.message_id,
+                    reply_markup=markup,
+                )
+                media_edited = True
+                print(f"[cover] cover badal diya (msg {sent.message_id})")
+            except Exception as e:
+                print(f"[cover] edit_message_media fail: {e}")
+
+        if not media_edited:
+            try:
+                bot.edit_message_caption(
+                    caption=caption,
+                    chat_id=target_user_id,
+                    message_id=sent.message_id,
+                    reply_markup=markup
+                )
+            except Exception as e:
+                print(f"[caption] {e}")
 
         schedule_auto_delete(target_user_id, sent.message_id, AUTO_DELETE_SECONDS)
         

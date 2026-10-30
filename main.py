@@ -17,10 +17,17 @@ OWNER_ID = int(os.environ.get('OWNER_ID', ''))
 # Target Bot
 TARGET_BOT = os.environ.get('TARGET_BOT', '@Doubtbustbot')
 
+# Branding
+BRAND = "@ModAppsKing"
+MAIN_BOT_NAME = "@Faphouse_King_Bot"
+
 # Custom Links
 TERAPLAY_LINK = "https://play.google.com/store/apps/details?id=in.shadowlink.anyplay"
 PLAN_LINK = "https://t.me/R0Y4L_KING"
 PORT = int(os.environ.get('PORT', '8080'))
+
+# Delivered video kitni der baad delete ho (seconds). 0 = kabhi delete nahi.
+AUTO_DELETE_SECONDS = int(os.environ.get('AUTO_DELETE_SECONDS', '3600'))
 # ===================================================================
 
 bot = telebot.TeleBot(BOT_TOKEN)
@@ -35,8 +42,164 @@ except Exception as e:
 loop = asyncio.new_event_loop()
 client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH, loop=loop)
 
-processing_lock = threading.Lock() 
-user_requests = {} 
+processing_lock = threading.Lock()
+user_requests = {}
+
+# ================= LOADING ANIMATION (spinner) =================
+# Ping-pong progress bar — message edit karke animate hoti hai
+BAR_FRAMES = [
+    "▰▱▱▱▱▱▱▱",
+    "▰▰▱▱▱▱▱▱",
+    "▰▰▰▱▱▱▱▱",
+    "▰▰▰▰▱▱▱▱",
+    "▰▰▰▰▰▱▱▱",
+    "▰▰▰▰▰▰▱▱",
+    "▰▰▰▰▰▰▰▱",
+    "▰▰▰▰▰▰▰▰",
+    "▱▰▰▰▰▰▰▰",
+    "▱▱▰▰▰▰▰▰",
+    "▱▱▱▰▰▰▰▰",
+    "▱▱▱▱▰▰▰▰",
+    "▱▱▱▱▱▰▰▰",
+    "▱▱▱▱▱▱▰▰",
+    "▱▱▱▱▱▱▱▰",
+]
+
+SPINNER_TEXT = (
+    "⏳ **Video connect ho rahi hai...**\n\n"
+    "`{bar}`\n\n"
+    "💎 **Premium lo — no waiting, instant downloads!**"
+)
+
+_spinners = {}
+_spinners_lock = threading.Lock()
+
+
+def start_spinner(chat_id, message_id, interval=1.6):
+    """Message ko continuously animate karta hai jab tak stop na ho."""
+    stop_event = threading.Event()
+    key = (chat_id, message_id)
+
+    with _spinners_lock:
+        old = _spinners.get(key)
+        if old:
+            old.set()
+        _spinners[key] = stop_event
+
+    def animate():
+        i = 0
+        while not stop_event.is_set():
+            try:
+                bot.edit_message_text(
+                    SPINNER_TEXT.format(bar=BAR_FRAMES[i % len(BAR_FRAMES)]),
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
+            i += 1
+            stop_event.wait(interval)
+        with _spinners_lock:
+            if _spinners.get(key) is stop_event:
+                _spinners.pop(key, None)
+
+    threading.Thread(target=animate, daemon=True).start()
+
+
+def stop_spinner(chat_id, message_id):
+    with _spinners_lock:
+        ev = _spinners.pop((chat_id, message_id), None)
+    if ev:
+        ev.set()
+
+
+def _edit(chat_id, message_id, text, reply_markup=None, parse_mode="Markdown"):
+    """Spinner rok kar message edit karta hai (ek hi jagah se saare updates)."""
+    stop_spinner(chat_id, message_id)
+    try:
+        bot.edit_message_text(
+            text=text,
+            chat_id=chat_id,
+            message_id=message_id,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+        )
+    except Exception as e:
+        print(f"[edit] {e}")
+
+
+# ================= CAPTION HELPERS =================
+def _human_size(num):
+    if not num:
+        return None
+    num = float(num)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if num < 1024 or unit == "TB":
+            return f"{int(num)} B" if unit == "B" else f"{num:.2f} {unit}"
+        num /= 1024.0
+
+
+def _human_duration(seconds):
+    if not seconds:
+        return None
+    seconds = int(seconds)
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h and m == 0 and s == 0:
+        return "1 hour" if h == 1 else f"{h} hours"
+    if h:
+        return f"{h}h {m}m {s}s"
+    if m:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+
+def build_video_caption(sent):
+    size = dur = None
+    if getattr(sent, "video", None):
+        size = getattr(sent.video, "file_size", None)
+        dur = getattr(sent.video, "duration", None)
+    elif getattr(sent, "document", None):
+        size = getattr(sent.document, "file_size", None)
+        dur = getattr(sent.document, "duration", None)
+
+    lines = []
+    size_txt = _human_size(size)
+    if size_txt:
+        lines.append(f"⚖️ Size: {size_txt}")
+    dur_txt = _human_duration(dur)
+    if dur_txt:
+        lines.append(f"⏳ Duration: {dur_txt}")
+    if lines:
+        lines.append("")
+
+    if AUTO_DELETE_SECONDS > 0:
+        lines.append(
+            f"⚠️ Note: This video will be auto-deleted from this chat in "
+            f"{_human_duration(AUTO_DELETE_SECONDS)}"
+        )
+        lines.append("")
+
+    lines.append(f"Thanks for using {MAIN_BOT_NAME} ❤️")
+    return "\n".join(lines)
+
+
+def schedule_auto_delete(chat_id, message_id, delay):
+    if delay <= 0:
+        return
+
+    def job():
+        try:
+            bot.delete_message(chat_id, message_id)
+            print(f"[auto-delete] message {message_id} deleted")
+        except Exception as e:
+            print(f"[auto-delete] {e}")
+
+    t = threading.Timer(delay, job)
+    t.daemon = True
+    t.start()
+
 
 # ================= TELETHON SIDE (Userbot Relay) =================
 
@@ -74,34 +237,26 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id):
             # ---> CASE A: Target bot ne ERROR de diya <---
             if msg.text and "ek link fir se bhejo" in msg.text.lower():
                 print("[telethon] Target bot fail ho gaya (Error message mila).")
-                try:
-                    bot.edit_message_text(
-                        "❌ **Download Failed!**\n\nTarget server par issue hai. Kripya koi dusra link try karein.",
-                        chat_id=user_chat_id,
-                        message_id=call_msg_id,
-                        parse_mode="Markdown"
-                    )
-                except Exception:
-                    pass
+                _edit(
+                    user_chat_id,
+                    call_msg_id,
+                    "❌ **Download Failed!**\n\nTarget server par issue hai. Kripya koi dusra link try karein.",
+                )
                 return False
 
             # ---> CASE B: PROGRESS BAR MIRRORING <---
             if msg.text and ("Progress" in msg.text or "Speed:" in msg.text or "ETA:" in msg.text):
                 progress_text = msg.text
                 if progress_text != last_progress_text:
-                    try:
-                        plan_markup = types.InlineKeyboardMarkup()
-                        plan_markup.add(types.InlineKeyboardButton("💎 Buy Premium", url=PLAN_LINK))
-                        
-                        bot.edit_message_text(
-                            text=f"{progress_text}\n\n⚡ Multiple videos ek saath download karna hai?\nPremium le lo!",
-                            chat_id=user_chat_id,
-                            message_id=call_msg_id,
-                            reply_markup=plan_markup
-                        )
-                        last_progress_text = progress_text
-                    except Exception:
-                        pass
+                    plan_markup = types.InlineKeyboardMarkup()
+                    plan_markup.add(types.InlineKeyboardButton("💎 Buy Premium", url=PLAN_LINK))
+                    _edit(
+                        user_chat_id,
+                        call_msg_id,
+                        f"{progress_text}\n\n⚡ Multiple videos ek saath download karna hai?\nPremium le lo!",
+                        reply_markup=plan_markup,
+                    )
+                    last_progress_text = progress_text
                 continue # Agar progress bar hai, to aage button check karne ki zarurat nahi
 
             # ---> CASE C: Video Aagayi <---
@@ -119,15 +274,11 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id):
                         reply_to=forwarded_msg.id
                     )
                     
-                    try:
-                        bot.edit_message_text(
-                            "✅ **Video Uploading Finished!**",
-                            chat_id=user_chat_id,
-                            message_id=call_msg_id,
-                            parse_mode="Markdown"
-                        )
-                    except Exception:
-                        pass
+                    _edit(
+                        user_chat_id,
+                        call_msg_id,
+                        "✅ **Video Uploading Finished!**",
+                    )
                     return True
 
             # ---> CASE D: Menu Buttons Aaye <---
@@ -171,16 +322,12 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id):
                                         await msg.click(i, j)
                                         quality_clicked = True
                                         clicked = True
-                                        
-                                        try:
-                                            bot.edit_message_text(
-                                                "⏳ **Video server par connect ho rahi hai...**",
-                                                chat_id=user_chat_id,
-                                                message_id=call_msg_id,
-                                                parse_mode="Markdown"
-                                            )
-                                        except Exception:
-                                            pass
+
+                                        _edit(
+                                            user_chat_id,
+                                            call_msg_id,
+                                            "⏳ **Video server par connect ho rahi hai...**",
+                                        )
                                     except Exception as e:
                                         print(f"Quality click error: {e}")
                                     break
@@ -188,15 +335,11 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id):
                         if clicked: break
                 
     print("[telethon] Error: Video aane me timeout ho gaya.")
-    try:
-        bot.edit_message_text(
-            "❌ **Timeout Error**\n\nVideo download hone me bohot zyada time lag gaya. Please try again later.",
-            chat_id=user_chat_id,
-            message_id=call_msg_id,
-            parse_mode="Markdown"
-        )
-    except Exception:
-        pass
+    _edit(
+        user_chat_id,
+        call_msg_id,
+        "❌ **Timeout Error**\n\nVideo download hone me bohot zyada time lag gaya. Please try again later.",
+    )
     return False
 
 def start_telethon_thread():
@@ -223,13 +366,13 @@ def start_command(message):
     asyncio.run_coroutine_threadsafe(_send_start_to_target(), loop)
 
     welcome_text = (
-        "🔥 **Faphouse Downloader Bot** — by YourBrand\n\n"
+        "🔥 **Faphouse Downloader Bot** — by @ModAppsKing\n\n"
         "📥 Bas apna **Faphouse link** bhejo, baaki mera kaam!\n"
         "Download + Upload — sab automatic. ⚡\n\n"
         "✅ **Ye links chalte hai:**\n"
         "• `faphouse.com` / `faphouse2.com` waale links\n\n"
         "⚡ Fast • 💪 Reliable • 🆓 Free\n"
-        "🚀 Powered by YourBrand"
+        "🚀 Powered by @ModAppsKing"
     )
     bot.send_message(
         message.chat.id, 
@@ -306,17 +449,24 @@ def process_download(call):
     plan_markup.add(types.InlineKeyboardButton("💎 Buy Premium - No Waiting!", url=PLAN_LINK))
     
     try:
+        bot.answer_callback_query(call.id, "⏳ Download shuru ho raha hai...")
+    except Exception:
+        pass
+
+    try:
         bot.edit_message_text(
-            "⏳ **Wait karo, download connect ho raha hai...**\n\n"
-            "💎 **Premium lo — no waiting, instant downloads!**",
+            SPINNER_TEXT.format(bar=BAR_FRAMES[0]),
             chat_id=chat_id,
             message_id=call.message.message_id,
             reply_markup=plan_markup,
-            parse_mode="Markdown"
+            parse_mode="Markdown",
         )
     except Exception as e:
         print(f"Edit msg error: {e}")
-    
+
+    # Loading animation chalu — koi bhi agla update isse khud rok dega
+    start_spinner(chat_id, call.message.message_id)
+
     with processing_lock:
         asyncio.run_coroutine_threadsafe(_fetch_from_target(url, chat_id, call.message.message_id), loop)
 
@@ -338,12 +488,26 @@ def handle_delivery(message):
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("💎 Buy Premium", url=PLAN_LINK))
         
-        bot.copy_message(
+        sent = bot.copy_message(
             chat_id=target_user_id,
             from_chat_id=message.chat.id,
             message_id=video_msg_id,
             reply_markup=markup
         )
+
+        # Target bot ka caption hata kar apna caption lagao
+        caption = build_video_caption(sent)
+        try:
+            bot.edit_message_caption(
+                caption=caption,
+                chat_id=target_user_id,
+                message_id=sent.message_id,
+                reply_markup=markup
+            )
+        except Exception as e:
+            print(f"[caption] {e}")
+
+        schedule_auto_delete(target_user_id, sent.message_id, AUTO_DELETE_SECONDS)
         
     except Exception as e:
         print(f"❌ Fatal Route Error: {e}")
@@ -383,4 +547,3 @@ if __name__ == "__main__":
             print(f"[fatal polling error] {e} — 5 sec me restart ho raha hai...")
             time.sleep(5)
             continue
-            

@@ -798,7 +798,9 @@ class Store:
                 self._save()
 
 
+print("[boot] store connect kar raha hai...")
 store = Store(MONGODB_URI, DB_PATH)
+print("[boot] store ready")
 
 
 def _deleted_notice_text():
@@ -1855,6 +1857,14 @@ def register_user(message):
         print(f"[users] register fail: {e}")
 
 
+@bot.message_handler(commands=['alive', 'ping'])
+def cmd_alive(message):
+    bot.send_message(
+        message.chat.id,
+        f"✅ Bot zinda hai.\nInstance: {INSTANCE_ID}\nDB: {'MongoDB' if store._users is not None else 'local JSON'}",
+    )
+
+
 @bot.message_handler(commands=['stats', 'users', 'admin'])
 def cmd_stats(message):
     if message.from_user.id != OWNER_ID:
@@ -2315,7 +2325,9 @@ INSTANCE_ID = (
     or ''.join(random.choices("abcdefghijklmnop", k=8))
 )
 LOCK_KEY = "bot_polling_lock"
-LOCK_STALE_SEC = int(os.environ.get('LOCK_STALE_SEC', '120'))
+LOCK_STALE_SEC = int(os.environ.get('LOCK_STALE_SEC', '45'))
+# Lock na mile to itni der baad bhi polling shuru kar do (bot dead na rahe)
+LOCK_MAX_WAIT_SEC = int(os.environ.get('LOCK_MAX_WAIT_SEC', '60'))
 
 
 def _heartbeat_loop():
@@ -2324,11 +2336,14 @@ def _heartbeat_loop():
             store.set_kv(LOCK_KEY, {"instance_id": INSTANCE_ID, "heartbeat": int(time.time())})
         except Exception as e:
             print(f"[lock] heartbeat fail: {e}")
-        time.sleep(30)
+        time.sleep(15)
 
 
 def acquire_polling_lock(wait_forever=True):
-    """Jab tak lock na mile tab tak wait karo (purana instance marne ka intezaar)."""
+    """Lock lo. Purana instance zinda ho to thoda wait, par bot ko dead mat rakho:
+    LOCK_MAX_WAIT_SEC ke baad polling shuru kar dete hain (409 aaye to retry hota hai).
+    """
+    started = time.time()
     while True:
         now = int(time.time())
         try:
@@ -2342,14 +2357,23 @@ def acquire_polling_lock(wait_forever=True):
         stale = (now - hb) > LOCK_STALE_SEC
 
         if not holder or holder == INSTANCE_ID or stale:
-            store.set_kv(LOCK_KEY, {"instance_id": INSTANCE_ID, "heartbeat": now})
+            try:
+                store.set_kv(LOCK_KEY, {"instance_id": INSTANCE_ID, "heartbeat": now})
+            except Exception as e:
+                print(f"[lock] write fail: {e}")
             print(f"[lock] polling lock mil gaya (instance {INSTANCE_ID})")
             return True
 
-        print(f"[lock] doosra instance ({holder}) abhi poll kar raha hai — wait...")
-        if not wait_forever:
+        waited = int(time.time() - started)
+        if not wait_forever or waited >= LOCK_MAX_WAIT_SEC:
+            print(
+                f"[lock] {waited}s wait ke baad bhi lock nahi mila (holder {holder}) — "
+                "phir bhi polling shuru kar rahe hain"
+            )
             return False
-        time.sleep(10)
+
+        print(f"[lock] doosra instance ({holder}) abhi poll kar raha hai — wait ({waited}s)...")
+        time.sleep(5)
 
 
 # ================= KEEP-ALIVE (self ping) =================
@@ -2376,11 +2400,16 @@ threading.Thread(target=_self_ping_loop, daemon=True).start()
 
 # ================= MAIN LOOP =================
 if __name__ == "__main__":
-    print(f"Main Bot is Live! (instance {INSTANCE_ID})")
-    bot.remove_webhook()
+    print(f"[boot] Main Bot is Live! (instance {INSTANCE_ID})")
+    try:
+        bot.remove_webhook()
+    except Exception as e:
+        print(f"[boot] remove_webhook fail: {e}")
 
-    acquire_polling_lock()
+    acquired = acquire_polling_lock()
+    print(f"[boot] lock acquired={acquired} — heartbeat + polling shuru")
     threading.Thread(target=_heartbeat_loop, daemon=True).start()
+    print("[boot] polling start ho raha hai...")
 
     while True:
         try:

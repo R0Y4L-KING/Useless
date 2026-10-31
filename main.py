@@ -662,6 +662,57 @@ class Store:
         with self._lock:
             return dict(self._data.get("kv", {}).get(key, {}))
 
+    def stats(self):
+        """Admin dashboard ke liye counts."""
+        now_iso = _now().isoformat()
+        today = _today()
+
+        if self._users is not None:
+            total = self._users.count_documents({})
+            new_today = self._users.count_documents({"joined": {"$gte": today}})
+            verified = self._users.count_documents({"verify_until": {"$gt": now_iso}})
+            premium = self._users.count_documents({"premium_until": {"$gt": now_iso}})
+            downloads = 0
+            try:
+                agg = list(self._users.aggregate([
+                    {"$group": {"_id": None, "t": {"$sum": "$total_downloads"}}}
+                ]))
+                if agg and agg[0].get("t"):
+                    downloads = int(agg[0]["t"])
+            except Exception as e:
+                print(f"[stats] agg fail: {e}")
+            orders = self._orders.count_documents({}) if self._orders is not None else 0
+            return {
+                "total": total,
+                "new_today": new_today,
+                "verified": verified,
+                "premium": premium,
+                "downloads": downloads,
+                "orders": orders,
+            }
+
+        with self._lock:
+            users = dict(self._data.get("users", {}))
+            orders_n = len(self._data.get("orders", {}))
+
+        total = len(users)
+        new_today = sum(1 for u in users.values() if str(u.get("joined", "")) >= today)
+        verified = sum(
+            1 for u in users.values() if str(u.get("verify_until", "")) > now_iso
+        )
+        premium = sum(
+            1 for u in users.values() if str(u.get("premium_until", "")) > now_iso
+        )
+        downloads = sum(int(u.get("total_downloads", 0) or 0) for u in users.values())
+        return {
+            "total": total,
+            "new_today": new_today,
+            "verified": verified,
+            "premium": premium,
+            "downloads": downloads,
+            "orders": orders_n,
+        }
+
     def set_kv(self, key, doc):
         if self._kv is not None:
             self._kv.update_one({"_id": key}, {"$set": doc}, upsert=True)
@@ -1786,8 +1837,51 @@ def get_main_keyboard():
     )
     return markup
 
+def register_user(message):
+    """Naya user DB me record karo (joined date ke saath) — stats ke liye."""
+    try:
+        user_id = message.from_user.id
+        existing = store.get_user(user_id)
+        if existing.get("joined"):
+            return
+        store.update_user(
+            user_id,
+            joined=_now().isoformat(),
+            first_name=(message.from_user.first_name or "")[:64],
+            username=(message.from_user.username or "")[:64],
+        )
+        print(f"[users] new user {user_id} ({message.from_user.first_name})")
+    except Exception as e:
+        print(f"[users] register fail: {e}")
+
+
+@bot.message_handler(commands=['stats', 'users', 'admin'])
+def cmd_stats(message):
+    if message.from_user.id != OWNER_ID:
+        return
+    try:
+        s = store.stats()
+        queue_len = job_queue.qsize() if job_queue is not None else 0
+        text = (
+            "📊 **Bot Stats**\n\n"
+            f"👥 **Total users:** {s['total']}\n"
+            f"🆕 **Naye users (aaj):** {s['new_today']}\n"
+            f"✅ **Abhi verified (1h window):** {s['verified']}\n"
+            f"💎 **Premium active:** {s['premium']}\n\n"
+            f"📥 **Total downloads:** {s['downloads']}\n"
+            f"🧾 **Orders:** {s['orders']}\n"
+            f"🕒 **Queue me abhi:** {queue_len}\n\n"
+            f"🗄 DB: {'MongoDB' if store._users is not None else 'local JSON'}"
+        )
+    except Exception as e:
+        text = f"Stats fail: {e}"
+    bot.send_message(message.chat.id, text, parse_mode="Markdown")
+
+
 @bot.message_handler(commands=['start'])
 def start_command(message):
+    register_user(message)
+
     parts = (message.text or "").split(maxsplit=1)
     payload = parts[1].strip() if len(parts) > 1 else ""
     if payload.startswith("verify_"):
@@ -1798,7 +1892,7 @@ def start_command(message):
 
     welcome_text = (
         "🔥 **Faphouse Downloader Bot**\n"
-        "by @ModAppsKing\n\n"
+        "by King\n\n"
         "📥 **Video ka link kaise laayein?**\n"
         "1️⃣ Browser (Chrome) me `faphouse2.com` kholo\n"
         "2️⃣ Jis video ko download karna hai, use open karo\n"

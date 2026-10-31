@@ -49,7 +49,8 @@ COVER_URL = os.environ.get(
 # ---- Premium / payment (UPI only, koi crypto nahi) ----
 UPI_ID = os.environ.get('UPI_ID', '20213904@axl')
 UPI_NAME = os.environ.get('UPI_NAME', 'ModAppsKing')
-SUPPORT_LINK = os.environ.get('SUPPORT_LINK', 'https://t.me/R0Y4L_KING')
+SUPPORT_LINK = os.environ.get('SUPPORT_LINK', 'https://t.me/ModAppsKing')
+SUPPORT_CHANNEL = os.environ.get('SUPPORT_CHANNEL', '@ModAppsKing')
 
 # Auto-delete ke baad bhejne wali 'deleted' image
 DELETED_PIC_URL = os.environ.get(
@@ -168,11 +169,21 @@ def _safe_answer_callback(callback_query_id, text=None, show_alert=False, **kwar
 bot.answer_callback_query = _safe_answer_callback
 
 try:
-    MAIN_BOT_USERNAME = f"@{bot.get_me().username}"
-    print(f"Bot Username detected as: {MAIN_BOT_USERNAME}")
+    _detected_username = bot.get_me().username
+    print(f"Bot Username detected as: @{_detected_username}")
 except Exception as e:
     print(f"Error fetching bot username: {e}")
-    MAIN_BOT_USERNAME = os.environ.get('BOT_USERNAME', '') or "@YourBotUsername"
+    _detected_username = ""
+
+# BOT_USERNAME env set hai to wahi use hoga (status + deep links dono ke liye)
+_env_username = os.environ.get('BOT_USERNAME', '').strip().lstrip('@')
+if _env_username:
+    MAIN_BOT_USERNAME = f"@{_env_username}"
+    print(f"BOT_USERNAME env se: {MAIN_BOT_USERNAME}")
+elif _detected_username:
+    MAIN_BOT_USERNAME = f"@{_detected_username}"
+else:
+    MAIN_BOT_USERNAME = "@YourBotUsername"
 
 loop = asyncio.new_event_loop()
 client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH, loop=loop)
@@ -662,6 +673,24 @@ class Store:
         with self._lock:
             return dict(self._data.get("kv", {}).get(key, {}))
 
+    def all_user_ids(self):
+        """Broadcast ke liye saare user ids."""
+        out = []
+        if self._users is not None:
+            for doc in self._users.find({}, {"_id": 1}):
+                try:
+                    out.append(int(doc["_id"]))
+                except Exception:
+                    pass
+            return out
+        with self._lock:
+            for key in self._data.get("users", {}).keys():
+                try:
+                    out.append(int(key))
+                except Exception:
+                    pass
+        return out
+
     def stats(self):
         """Admin dashboard ke liye counts."""
         now_iso = _now().isoformat()
@@ -805,28 +834,25 @@ print("[boot] store ready")
 
 def _deleted_notice_text():
     return (
-        "🗑 Your video / file has been deleted due to timeout.\n\n"
-        "If you want to see it again please resend link.\n\n"
-        "आपका वीडियो / फाइल डिलीट कर दी गई है, आपको फिर से देखनी है तो लिंक दोबारा भेजें धन्यवाद!\n\n"
-        f"💬 Support: {SUPPORT_LINK}"
+        "Your video / file has been deleted due to timeout .\n\n"
+        "if you want to see it again please resend link.\n\n"
+        "आपका वीडियो / फाइल डिलीट कर दी गयी है आपको फिर से देखनी है तो लिंक दोबारा भेजे धन्यवाद!\n\n"
+        f"Our Support Channel : {SUPPORT_CHANNEL}"
     )
 
 
 def send_deleted_notice(chat_id):
-    """Delete hone ke baad trash image + resend message bhejo."""
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    markup.add(types.InlineKeyboardButton("📥 Resend Link", callback_data="back_home"))
-    markup.add(types.InlineKeyboardButton("💬 Support Group", url=SUPPORT_LINK))
+    """Delete hone ke baad trash image + caption bhejo (koi button nahi)."""
     caption = _deleted_notice_text()
     try:
         if DELETED_PIC_URL:
-            bot.send_photo(chat_id, DELETED_PIC_URL, caption=caption, reply_markup=markup)
+            bot.send_photo(chat_id, DELETED_PIC_URL, caption=caption)
         else:
-            bot.send_message(chat_id, caption, reply_markup=markup)
+            bot.send_message(chat_id, caption)
     except Exception as e:
         print(f"[auto-delete] notice photo fail: {e}")
         try:
-            bot.send_message(chat_id, caption, reply_markup=markup)
+            bot.send_message(chat_id, caption)
         except Exception as e2:
             print(f"[auto-delete] notice fail: {e2}")
 
@@ -1865,32 +1891,167 @@ def cmd_alive(message):
     )
 
 
-@bot.message_handler(commands=['stats', 'users', 'admin'])
+# ================= ADMIN PANEL =================
+admin_state = {}
+
+
+def _stats_text():
+    try:
+        s = store.stats()
+    except Exception as e:
+        return f"Stats fail: {e}"
+    queue_len = job_queue.qsize() if job_queue is not None else 0
+    return (
+        "📊 **Bot Stats**\n\n"
+        f"👥 **Total users:** {s['total']}\n"
+        f"🆕 **Naye users (aaj):** {s['new_today']}\n"
+        f"✅ **Abhi verified:** {s['verified']}\n"
+        f"💎 **Premium active:** {s['premium']}\n\n"
+        f"📥 **Total downloads:** {s['downloads']}\n"
+        f"🧾 **Orders:** {s['orders']}\n"
+        f"🕒 **Queue:** {queue_len}\n\n"
+        f"🗄 DB: {'MongoDB' if store._users is not None else 'local JSON'}"
+    )
+
+
+def admin_panel_markup():
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(types.InlineKeyboardButton("📊 Stats", callback_data="adm:stats"))
+    markup.add(types.InlineKeyboardButton("📢 Broadcast", callback_data="adm:bc"))
+    markup.add(types.InlineKeyboardButton("➕ Add Premium", callback_data="adm:add"))
+    markup.add(types.InlineKeyboardButton("➖ Remove Premium", callback_data="adm:rem"))
+    return markup
+
+
+def _broadcast_worker(admin_chat_id, from_chat_id, message_id):
+    ids = store.all_user_ids()
+    ok = fail = 0
+    for uid in ids:
+        try:
+            bot.copy_message(chat_id=uid, from_chat_id=from_chat_id, message_id=message_id)
+            ok += 1
+        except Exception:
+            fail += 1
+        time.sleep(0.06)
+    bot.send_message(
+        admin_chat_id,
+        f"📢 **Broadcast done**\n\n✅ Sent: {ok}\n❌ Failed: {fail}\n👥 Total users: {len(ids)}",
+        parse_mode="Markdown",
+    )
+
+
+@bot.message_handler(commands=['admin', 'panel'])
+def admin_panel(message):
+    if message.from_user.id != OWNER_ID:
+        return
+    bot.send_message(
+        message.chat.id,
+        "🛠 **Admin Panel**\n\nNeeche se option chuno:",
+        reply_markup=admin_panel_markup(),
+        parse_mode="Markdown",
+    )
+
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith("adm:"))
+def cb_admin(call):
+    if call.from_user.id != OWNER_ID:
+        bot.answer_callback_query(call.id, "Sirf owner.", show_alert=True)
+        return
+
+    action = call.data.split(":", 1)[1]
+    bot.answer_callback_query(call.id)
+    chat_id = call.message.chat.id
+
+    if action == "stats":
+        bot.send_message(chat_id, _stats_text(), parse_mode="Markdown")
+    elif action == "bc":
+        admin_state[call.from_user.id] = "broadcast"
+        bot.send_message(
+            chat_id,
+            "📢 Jo message broadcast karna hai wo ab bhejo (text, photo, video — kuch bhi).\n\n"
+            "Cancel karne ke liye /canceladmin",
+        )
+    elif action == "add":
+        admin_state[call.from_user.id] = "addpremium"
+        bot.send_message(
+            chat_id,
+            "➕ Format: `user_id days`\n\nJaise: `123456789 30`",
+            parse_mode="Markdown",
+        )
+    elif action == "rem":
+        admin_state[call.from_user.id] = "removepremium"
+        bot.send_message(chat_id, "➖ Jis user ka premium hatana hai uska user_id bhejo.")
+
+
+@bot.message_handler(commands=['canceladmin'])
+def cancel_admin(message):
+    if message.from_user.id != OWNER_ID:
+        return
+    admin_state.pop(message.from_user.id, None)
+    bot.send_message(message.chat.id, "✅ Admin action cancel ho gaya.")
+
+
+@bot.message_handler(
+    content_types=['text', 'photo', 'video', 'document'],
+    func=lambda m: m.from_user.id == OWNER_ID and m.from_user.id in admin_state,
+)
+def admin_input(message):
+    action = admin_state.pop(message.from_user.id, None)
+    chat_id = message.chat.id
+
+    if action == "broadcast":
+        bot.send_message(chat_id, "📢 Broadcast shuru ho gaya... result baad me bhejta hoon.")
+        threading.Thread(
+            target=_broadcast_worker,
+            args=(chat_id, message.chat.id, message.message_id),
+            daemon=True,
+        ).start()
+        return
+
+    text = (message.text or "").strip()
+
+    if action == "addpremium":
+        parts = text.split()
+        if len(parts) != 2:
+            bot.send_message(chat_id, "❌ Format: user_id days — jaise `123456789 30`", parse_mode="Markdown")
+            return
+        try:
+            uid, days = int(parts[0]), int(parts[1])
+        except ValueError:
+            bot.send_message(chat_id, "❌ Numbers hone chahiye. Jaise: `123456789 30`", parse_mode="Markdown")
+            return
+        until = grant_premium(uid, days)
+        bot.send_message(
+            chat_id,
+            f"✅ {uid} ko {days} din ka premium diya.\nExpiry: {until.strftime('%d %b %Y, %I:%M %p')} UTC",
+        )
+        try:
+            bot.send_message(uid, f"💎 Premium activated! Valid till {until.strftime('%d %b %Y')}.")
+        except Exception:
+            pass
+        return
+
+    if action == "removepremium":
+        try:
+            uid = int(text)
+        except ValueError:
+            bot.send_message(chat_id, "❌ user_id number hona chahiye.")
+            return
+        revoke_premium(uid)
+        bot.send_message(chat_id, f"✅ {uid} ka premium hata diya.")
+
+
+@bot.message_handler(commands=['stats', 'users'])
 def cmd_stats(message):
     if message.from_user.id != OWNER_ID:
         return
-    try:
-        s = store.stats()
-        queue_len = job_queue.qsize() if job_queue is not None else 0
-        text = (
-            "📊 **Bot Stats**\n\n"
-            f"👥 **Total users:** {s['total']}\n"
-            f"🆕 **Naye users (aaj):** {s['new_today']}\n"
-            f"✅ **Abhi verified (1h window):** {s['verified']}\n"
-            f"💎 **Premium active:** {s['premium']}\n\n"
-            f"📥 **Total downloads:** {s['downloads']}\n"
-            f"🧾 **Orders:** {s['orders']}\n"
-            f"🕒 **Queue me abhi:** {queue_len}\n\n"
-            f"🗄 DB: {'MongoDB' if store._users is not None else 'local JSON'}"
-        )
-    except Exception as e:
-        text = f"Stats fail: {e}"
-    bot.send_message(message.chat.id, text, parse_mode="Markdown")
+    bot.send_message(message.chat.id, _stats_text(), parse_mode="Markdown")
 
 
 @bot.message_handler(commands=['start'])
 def start_command(message):
     register_user(message)
+
 
     parts = (message.text or "").split(maxsplit=1)
     payload = parts[1].strip() if len(parts) > 1 else ""
@@ -1901,7 +2062,7 @@ def start_command(message):
     asyncio.run_coroutine_threadsafe(_send_start_to_target(), loop)
 
     welcome_text = (
-        "🔥 <b>Faphouse King</b>\n\n"
+        "<blockquote>💫 <b>Welcome To Faphouse King Bot</b> 💫</blockquote>\n\n"
         "<blockquote expandable>📥 <b>How to use</b>\n"
         "1. Open <b>faphouse2.com</b>\n"
         "2. Open any video\n"

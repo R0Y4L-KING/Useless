@@ -359,7 +359,7 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
     main_bot_entity = await client.get_entity(MAIN_BOT_USERNAME)
 
     await client.send_message(target_entity, "/start")
-    await asyncio.sleep(1.0)
+    await asyncio.sleep(0.7)
 
     sent_link = await client.send_message(target_entity, url)
     last_seen_id = sent_link.id
@@ -371,8 +371,8 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
     last_progress_text = ""
     
     # 🧠 SUPER LOOP (120 * 2 sec = 240 seconds = 4 minutes)
-    for _ in range(120): 
-        await asyncio.sleep(2)  # Fast check
+    for _ in range(160): 
+        await asyncio.sleep(1.5)  # Fast check (total ~4 min)
         # sirf apne link ke baad aaye messages (min_id) — purane/doosre user ke nahi
         history = await client.get_messages(target_entity, limit=10, min_id=last_seen_id)
         history = list(reversed(history))  # purane pehle
@@ -1901,22 +1901,18 @@ def start_command(message):
     asyncio.run_coroutine_threadsafe(_send_start_to_target(), loop)
 
     welcome_text = (
-        "🔥 **Faphouse Downloader Bot**\n"
-        "by King\n\n"
-        "📥 **Video ka link kaise laayein?**\n"
-        "1️⃣ Browser (Chrome) me `faphouse2.com` kholo\n"
-        "2️⃣ Jis video ko download karna hai, use open karo\n"
-        "3️⃣ Link copy karne ke 2 tareeke:\n"
-        "      • Video ke **thumbnail par ungli dabaye rakho** (long press)\n"
-        "        ➜ **Copy link address** dabao\n"
-        "      • Ya upar **address bar** se poora link copy karo\n"
-        "        (ya Share ➜ Copy link)\n"
-        "4️⃣ Wahi link yahan paste karke bhej do\n\n"
-        "⚡ Bas itna hi — video seedha is chat me aa jaayegi.\n"
-        "Download + upload sab automatic.\n\n"
-        f"🎁 Pehle **{FREE_TRIAL_DOWNLOADS} videos free**, uske baad ads verify karo "
-        f"aur **{ADS_REWARD_MINUTES} minute unlimited**.\n"
-        "💎 /premium — bina ads, hamesha unlimited."
+        "🔥 <b>Faphouse King</b>\n\n"
+        "<blockquote expandable>📥 <b>How to use</b>\n"
+        "1. Open <b>faphouse2.com</b>\n"
+        "2. Open any video\n"
+        "3. Tap <b>Share</b> ➜ <b>Copy link</b>\n"
+        "      (ya thumbnail par long press ➜ Copy link address)\n"
+        "4. Wahi link yahan bhej do — full HD video main bhej dunga</blockquote>\n\n"
+        "✅ <b>Supported:</b> faphouse.com / faphouse2.com\n"
+        "⚡ Fast • Reliable • Free\n\n"
+        f"🎁 Pehle <b>{FREE_TRIAL_DOWNLOADS} videos free</b>, uske baad verify karke "
+        f"<b>{ADS_REWARD_MINUTES} min unlimited</b>\n"
+        "💎 /premium — no ads, unlimited"
     )
 
     markup = types.InlineKeyboardMarkup(row_width=1)
@@ -1927,7 +1923,7 @@ def start_command(message):
         message.chat.id,
         welcome_text,
         reply_markup=get_main_keyboard(),
-        parse_mode="Markdown",
+        parse_mode="HTML",
     )
     bot.send_message(
         message.chat.id,
@@ -2182,12 +2178,37 @@ li.ok{color:#059669}
 })();
 </script></body></html>"""
 
-GATEWAY_EXPIRED_PAGE = """<!DOCTYPE html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>Link Expired</title></head>
-<body style="font-family:system-ui,sans-serif;padding:40px;text-align:center;color:#374151">
-<h2>\u231B Link expired or already used</h2>
-<p>Bot me wapas jaake <b>Verify Now</b> dabao aur naya link lo.</p>
-</body></html>"""
+GATEWAY_EXPIRED_PAGE = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Link Expired</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+font-family:Inter,system-ui,-apple-system,sans-serif;background:linear-gradient(135deg,#667eea,#764ba2);padding:18px}
+.card{background:#fff;border-radius:22px;padding:34px 24px;max-width:400px;width:100%;
+text-align:center;box-shadow:0 18px 44px rgba(0,0,0,.22)}
+.icon{font-size:52px;line-height:1;margin-bottom:14px}
+h1{font-size:22px;margin:0 0 10px;color:#111827}
+p{color:#6b7280;font-size:15px;line-height:1.55;margin:0 0 22px}
+.btn{display:block;text-decoration:none;background:linear-gradient(135deg,#4f46e5,#7c3aed);
+color:#fff;font-weight:700;padding:15px;border-radius:14px;font-size:16px;
+box-shadow:0 8px 20px rgba(79,70,229,.35)}
+.hint{margin-top:16px;font-size:13px;color:#9ca3af}
+</style></head>
+<body><div class="card">
+<div class="icon">\u231B</div>
+<h1>Link expired</h1>
+<p>Ye verification link expire ho gaya ya pehle use ho chuka hai.<br>Naya link lene ke liye bot me <b>Verify Now</b> dabao.</p>
+<a class="btn" href="__BOT__">\U0001F4F2 Open Bot</a>
+<div class="hint">Ek link sirf ek baar chalta hai</div>
+</div></body></html>"""
+
+
+def _expired_page():
+    return GATEWAY_EXPIRED_PAGE.replace(
+        "__BOT__", f"https://t.me/{MAIN_BOT_USERNAME.lstrip('@')}"
+    )
 
 
 def _gateway_token_check(token):
@@ -2261,7 +2282,7 @@ def run_dummy_server():
                     return
                 ok, _why = _gateway_token_check(token)
                 if not ok:
-                    self._html(410, GATEWAY_EXPIRED_PAGE)
+                    self._html(410, _expired_page())
                     return
                 self._html(200, GATEWAY_PAGE.replace("__TOKEN__", token))
                 return

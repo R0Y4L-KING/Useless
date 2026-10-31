@@ -337,16 +337,26 @@ async def _send_start_to_target():
         pass
 
 async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
-    """refund_kind: agar download fail ho to credit/free download wapas karne ke liye."""
+    """refund_kind: agar download fail ho to credit/free download wapas karne ke liye.
+
+    NOTE: ye ek hi userbot chat me chalta hai, isliye sirf ek download ek waqt pe
+    (queue worker se). Yahan min_id se sirf usi link ke BAAD ke messages padhte
+    hain, warna doosre user ki video bhi pakdi ja sakti hai.
+    """
+    # apni baari aayi — status message pe animation wapas chalu karo
+    _edit(user_chat_id, call_msg_id, SPINNER_TEXT.format(bar=BAR_FRAMES[0]))
+    start_spinner(user_chat_id, call_msg_id)
+
     target_entity = await client.get_entity(TARGET_BOT)
     main_bot_entity = await client.get_entity(MAIN_BOT_USERNAME)
-    
+
     await client.send_message(target_entity, "/start")
-    await asyncio.sleep(1.5) 
-    
-    await client.send_message(target_entity, url)
-    print(f"[telethon] Link sent to target bot for user {user_chat_id}")
-    
+    await asyncio.sleep(1.0)
+
+    sent_link = await client.send_message(target_entity, url)
+    last_seen_id = sent_link.id
+    print(f"[telethon] Link sent to target bot for user {user_chat_id} (msg {last_seen_id})")
+
     forwarded_video_ids = set()
     ad_clicked = False
     quality_clicked = False
@@ -355,9 +365,13 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
     # 🧠 SUPER LOOP (120 * 2 sec = 240 seconds = 4 minutes)
     for _ in range(120): 
         await asyncio.sleep(2)  # Fast check
-        history = await client.get_messages(target_entity, limit=4)
-        
+        # sirf apne link ke baad aaye messages (min_id) — purane/doosre user ke nahi
+        history = await client.get_messages(target_entity, limit=10, min_id=last_seen_id)
+        history = list(reversed(history))  # purane pehle
+
         for msg in history:
+            if msg.id > last_seen_id:
+                last_seen_id = msg.id
             if msg.out: 
                 continue 
             
@@ -473,9 +487,58 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
     )
     return False
 
+# ================= DOWNLOAD QUEUE (ek waqt me ek download) =================
+# Target bot ke saath ek hi userbot chat hai. Do links ek saath bhejne se
+# target bot ka state mix ho jaata tha aur video galat user ko chali jaati thi.
+# Isliye ab har download queue me jaati hai aur worker ek-ek karke chalata hai.
+job_queue = None
+
+
+async def _enqueue_job(job):
+    """Queue me daalo aur user ko uski position batao."""
+    if job_queue is None:
+        print("[queue] queue ready nahi hai")
+        _edit(job["user_chat_id"], job["call_msg_id"], "⏳ Bot start ho raha hai — link 10 second baad dobara bhejo.")
+        refund_download(job["user_chat_id"], job.get("refund_kind", ""))
+        return
+    pos = job_queue.qsize() + 1
+    if pos > 1:
+        _edit(
+            job["user_chat_id"],
+            job["call_msg_id"],
+            f"🕒 **Aap queue me hain**\n\nAapse pehle {pos - 1} download chal rahi hai. "
+            "Aapki baari aate hi apne aap shuru ho jaayega — link dobara mat bhejo.",
+        )
+    await job_queue.put(job)
+
+
+async def _download_worker():
+    print("[queue] download worker ready (ek waqt me ek download)")
+    while True:
+        job = await job_queue.get()
+        try:
+            await _fetch_from_target(**job)
+        except Exception as e:
+            print(f"[queue] job fail: {e}")
+            try:
+                _edit(
+                    job["user_chat_id"],
+                    job["call_msg_id"],
+                    "❌ **Kuch galat ho gaya.** Link dobara bhejo.",
+                )
+                refund_download(job["user_chat_id"], job.get("refund_kind", ""))
+            except Exception:
+                pass
+        finally:
+            job_queue.task_done()
+
+
 def start_telethon_thread():
+    global job_queue
     asyncio.set_event_loop(loop)
     loop.run_until_complete(client.connect())
+    job_queue = asyncio.Queue()
+    loop.create_task(_download_worker())
     print("Userbot Session Active...") 
     loop.run_forever()
 
@@ -1794,10 +1857,15 @@ def begin_download(chat_id, url=None):
         return
 
     start_spinner(chat_id, status_id)
-    with processing_lock:
-        asyncio.run_coroutine_threadsafe(
-            _fetch_from_target(url, chat_id, status_id, refund_kind=info), loop
-        )
+    asyncio.run_coroutine_threadsafe(
+        _enqueue_job({
+            "url": url,
+            "user_chat_id": chat_id,
+            "call_msg_id": status_id,
+            "refund_kind": info,
+        }),
+        loop,
+    )
 
 
 @bot.message_handler(func=lambda msg: msg.text and "http" in msg.text)

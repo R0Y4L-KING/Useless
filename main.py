@@ -70,6 +70,8 @@ PUBLIC_URL = os.environ.get('PUBLIC_URL', '').rstrip('/')
 VERIFY_LINK_MODE = os.environ.get('VERIFY_LINK_MODE', 'page_first').strip().lower()
 FREE_TRIAL_DOWNLOADS = int(os.environ.get('FREE_TRIAL_DOWNLOADS', '3'))
 ADS_REWARD_DOWNLOADS = int(os.environ.get('ADS_REWARD_DOWNLOADS', '5'))
+# Verify ke baad kitne minute unlimited downloads
+ADS_REWARD_MINUTES = int(os.environ.get('ADS_REWARD_MINUTES', '60'))
 VERIFY_TOKEN_TTL_MIN = int(os.environ.get('VERIFY_TOKEN_TTL_MIN', '60'))
 
 # Premium data: MongoDB (recommended) ya local JSON file
@@ -868,13 +870,36 @@ def refund_download(user_id, kind):
     print(f"[refund] {user_id} ka {kind} download wapas kiya")
 
 
+def verify_active_until(user_id):
+    """Ads verify karne ke baad ka unlimited time (datetime) ya None."""
+    exp = store.get_user(user_id).get("verify_until")
+    if not exp:
+        return None
+    try:
+        until = datetime.datetime.fromisoformat(str(exp))
+    except Exception:
+        return None
+    return until if until > _now() else None
+
+
+def grant_verify_time(user_id, minutes=None):
+    minutes = int(minutes or ADS_REWARD_MINUTES)
+    until = _now() + datetime.timedelta(minutes=minutes)
+    store.update_user(user_id, verify_until=until.isoformat())
+    return until
+
+
 def consume_download(user_id):
     """Ek download consume karo. Returns (allowed, info).
-    info: 'premium' | 'credits' | 'free' | 'verify' | 'daily'
+    info: 'premium' | 'verified' | 'credits' | 'free' | 'verify' | 'daily'
     """
     if is_premium(user_id):
         bump_usage(user_id)
         return True, "premium"
+
+    if verify_active_until(user_id):
+        bump_usage(user_id)
+        return True, "verified"
 
     if FREE_DAILY_LIMIT > 0 and usage_today(user_id) >= FREE_DAILY_LIMIT:
         return False, "daily"
@@ -898,6 +923,12 @@ def consume_download(user_id):
 def downloads_left_text(user_id):
     if is_premium(user_id):
         return "Unlimited (Premium)"
+
+    until = verify_active_until(user_id)
+    if until:
+        mins = max(1, int((until - _now()).total_seconds() // 60))
+        return f"Unlimited — verified ({mins} min left)"
+
     user = store.get_user(user_id)
     credits = int(user.get("credits", 0))
     free_used = int(user.get("free_used", 0))
@@ -1020,16 +1051,14 @@ def handle_verify_payload(message, token):
         return
 
     store.use_token(token)
-    user = store.get_user(user_id)
-    new_credits = int(user.get("credits", 0)) + ADS_REWARD_DOWNLOADS
-    store.update_user(user_id, credits=new_credits)
+    until = grant_verify_time(user_id)
 
     bot.send_message(
         chat_id,
         "✅ **Verification complete!**\n\n"
-        f"🎁 Aapko {ADS_REWARD_DOWNLOADS} downloads mil gaye.\n"
-        f"📥 Ab aapke paas total **{new_credits}** ad-verified downloads hain.\n\n"
-        "Ab apna Faphouse link bhejo! 🚀",
+        f"🎁 Agle **{ADS_REWARD_MINUTES} minute tak UNLIMITED downloads**.\n"
+        f"⏳ Valid till: {until.strftime('%I:%M %p')} (UTC)\n\n"
+        "Ab jitni videos chahiye bhejo! 🚀",
         reply_markup=get_main_keyboard(),
         parse_mode="Markdown",
     )
@@ -1057,7 +1086,7 @@ def verify_command(message):
     bot.send_message(
         message.chat.id,
         f"🔓 **Ad Verification**\n\n"
-        f"Link kholo, checks complete karo, phir {ADS_REWARD_DOWNLOADS} downloads milenge.\n"
+        f"Link kholo, checks complete karo, phir {ADS_REWARD_MINUTES} minute ke liye unlimited downloads milenge.\n"
         "Samajh nahi aa raha? 'How To Verify' dabao.",
         reply_markup=markup,
         parse_mode="Markdown",
@@ -1768,25 +1797,35 @@ def start_command(message):
     asyncio.run_coroutine_threadsafe(_send_start_to_target(), loop)
 
     welcome_text = (
-        "🔥 **Faphouse Downloader Bot** — by @ModAppsKing\n\n"
-        "📥 Bas apna **Faphouse link** bhejo, baaki mera kaam!\n"
-        "Download + Upload — sab automatic. ⚡\n\n"
-        "✅ **Ye links chalte hai:**\n"
-        "• `faphouse.com` / `faphouse2.com` waale links\n\n"
-        "⚡ Fast • 💪 Reliable • 🆓 Free\n"
-        "🚀 Powered by @ModAppsKing"
+        "🔥 **Faphouse Downloader Bot**\n"
+        "by @ModAppsKing\n\n"
+        "📥 **Video ka link kaise laayein?**\n"
+        "1️⃣ Browser (Chrome) me `faphouse2.com` kholo\n"
+        "2️⃣ Jis video ko download karna hai, use open karo\n"
+        "3️⃣ Upar address bar se poora link copy karo\n"
+        "      (ya Share ➜ Copy link dabao)\n"
+        "4️⃣ Wahi link yahan paste karke bhej do\n\n"
+        "⚡ Bas itna hi — video seedha is chat me aa jaayegi.\n"
+        "Download + upload sab automatic.\n\n"
+        f"🎁 Pehle **{FREE_TRIAL_DOWNLOADS} videos free**, uske baad ads verify karo "
+        f"aur **{ADS_REWARD_MINUTES} minute unlimited**.\n"
+        "💎 /premium — bina ads, hamesha unlimited."
     )
+
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(types.InlineKeyboardButton("📺 How To Copy Link", url=TUT_VID))
+    markup.add(types.InlineKeyboardButton("💎 Premium Plans", callback_data="premium_menu"))
+
     bot.send_message(
-        message.chat.id, 
+        message.chat.id,
         welcome_text,
         reply_markup=get_main_keyboard(),
-        parse_mode="Markdown"
+        parse_mode="Markdown",
     )
     bot.send_message(
         message.chat.id,
-        f"🎁 Pehle {FREE_TRIAL_DOWNLOADS} videos free! Uske baad ads verify karke "
-        f"{ADS_REWARD_DOWNLOADS} aur downloads — ya /premium se unlimited.\n\n"
         "👇 Apna Faphouse link bhejo boss!",
+        reply_markup=markup,
     )
 
 @bot.message_handler(func=lambda msg: msg.text == "📥 Download")
@@ -1860,7 +1899,7 @@ def send_verify_gate(chat_id, reason="verify"):
         text = (
             f"🔒 **Aapke {FREE_TRIAL_DOWNLOADS} free videos khatam ho gaye!**\n\n"
             "Neeche wale link se ads complete karo aur "
-            f"**{ADS_REWARD_DOWNLOADS} aur downloads** paao.\n\n"
+            f"**{ADS_REWARD_MINUTES} minute ke liye unlimited downloads** paao.\n\n"
             "⚡ Ya phir Premium lo — unlimited, bina ads."
         )
     bot.send_message(chat_id, text, reply_markup=markup, parse_mode="Markdown")

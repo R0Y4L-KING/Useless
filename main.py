@@ -51,6 +51,12 @@ UPI_ID = os.environ.get('UPI_ID', '20213904@axl')
 UPI_NAME = os.environ.get('UPI_NAME', 'ModAppsKing')
 SUPPORT_LINK = os.environ.get('SUPPORT_LINK', 'https://t.me/R0Y4L_KING')
 
+# Auto-delete ke baad bhejne wali 'deleted' image
+DELETED_PIC_URL = os.environ.get(
+    'DELETED_PIC_URL',
+    'https://raw.githubusercontent.com/R0Y4L-KING/Useless/main/deleted.jpg',
+)
+
 # Free users ke liye rozana download limit. 0 = unlimited (koi rok nahi)
 FREE_DAILY_LIMIT = int(os.environ.get('FREE_DAILY_LIMIT', '0'))
 
@@ -742,8 +748,36 @@ class Store:
 store = Store(MONGODB_URI, DB_PATH)
 
 
+def _deleted_notice_text():
+    return (
+        "🗑 Your video / file has been deleted due to timeout.\n\n"
+        "If you want to see it again please resend link.\n\n"
+        "आपका वीडियो / फाइल डिलीट कर दी गई है, आपको फिर से देखनी है तो लिंक दोबारा भेजें धन्यवाद!\n\n"
+        f"💬 Support: {SUPPORT_LINK}"
+    )
+
+
+def send_deleted_notice(chat_id):
+    """Delete hone ke baad trash image + resend message bhejo."""
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(types.InlineKeyboardButton("📥 Resend Link", callback_data="back_home"))
+    markup.add(types.InlineKeyboardButton("💬 Support Group", url=SUPPORT_LINK))
+    caption = _deleted_notice_text()
+    try:
+        if DELETED_PIC_URL:
+            bot.send_photo(chat_id, DELETED_PIC_URL, caption=caption, reply_markup=markup)
+        else:
+            bot.send_message(chat_id, caption, reply_markup=markup)
+    except Exception as e:
+        print(f"[auto-delete] notice photo fail: {e}")
+        try:
+            bot.send_message(chat_id, caption, reply_markup=markup)
+        except Exception as e2:
+            print(f"[auto-delete] notice fail: {e2}")
+
+
 def _deletion_sweeper():
-    """Har 60 second me due deletions delete karta hai."""
+    """Har 30 second me due deletions delete karta hai, phir notice bhejta hai."""
     while True:
         try:
             now_iso = _now().isoformat()
@@ -752,6 +786,7 @@ def _deletion_sweeper():
                 try:
                     bot.delete_message(doc["chat_id"], doc["message_id"])
                     print(f"[auto-delete] deleted {key}")
+                    send_deleted_notice(doc["chat_id"])
                 except Exception as e:
                     print(f"[auto-delete] {key} delete fail: {e}")
                 store.remove_deletion(key)

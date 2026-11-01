@@ -2076,21 +2076,13 @@ def start_command(message):
         "💎 /premium — no ads, unlimited"
     )
 
-    markup = types.InlineKeyboardMarkup(row_width=1)
-    markup.add(types.InlineKeyboardButton("📺 How To Copy Link", url=TUT_VID))
-    markup.add(types.InlineKeyboardButton("💎 Premium Plans", callback_data="premium_menu"))
-
     bot.send_message(
         message.chat.id,
         welcome_text,
         reply_markup=get_main_keyboard(),
         parse_mode="HTML",
     )
-    bot.send_message(
-        message.chat.id,
-        "👇 Apna Faphouse link bhejo boss!",
-        reply_markup=markup,
-    )
+    bot.send_message(message.chat.id, "👇 Apna Faphouse link bhejo boss!")
 
 @bot.message_handler(func=lambda msg: msg.text == "📥 Download")
 def handle_download_btn(message):

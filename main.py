@@ -2222,6 +2222,56 @@ def process_download(call):
 
 
 # ================= INTERNAL ROUTING =================
+def _finalize_delivery(chat_id, sent, markup, tries=5):
+    """Target bot ka caption + cover hatao. Badi video pe Telegram edit reject
+    kar deta hai (video abhi process ho rahi hoti hai), isliye retry karte hain."""
+    caption = build_video_caption(sent)
+    delays = [0, 4, 8, 12, 18]
+
+    for attempt in range(tries):
+        delay = delays[attempt] if attempt < len(delays) else 15
+        if delay:
+            time.sleep(delay)
+
+        # 1) pehle cover + caption ek saath
+        if REPLACE_COVER and COVER_URL and getattr(sent, "video", None):
+            try:
+                media = types.InputMediaVideo(
+                    media=sent.video.file_id,
+                    caption=caption,
+                    width=getattr(sent.video, "width", None),
+                    height=getattr(sent.video, "height", None),
+                    duration=getattr(sent.video, "duration", None),
+                    supports_streaming=True,
+                    cover=COVER_URL,
+                )
+                bot.edit_message_media(
+                    media=media,
+                    chat_id=chat_id,
+                    message_id=sent.message_id,
+                    reply_markup=markup,
+                )
+                print(f"[deliver] cover + caption set (try {attempt + 1})")
+                return
+            except Exception as e:
+                print(f"[deliver] media try {attempt + 1} fail: {e}")
+
+        # 2) cover na lage to kam se kam caption to lag jaaye
+        try:
+            bot.edit_message_caption(
+                caption=caption,
+                chat_id=chat_id,
+                message_id=sent.message_id,
+                reply_markup=markup,
+            )
+            print(f"[deliver] caption set (try {attempt + 1})")
+            return
+        except Exception as e:
+            print(f"[deliver] caption try {attempt + 1} fail: {e}")
+
+    print(f"[deliver] caption/cover set nahi ho paaya (msg {sent.message_id})")
+
+
 @bot.message_handler(func=lambda msg: msg.text and msg.text.startswith("DELIVER "))
 def handle_delivery(message):
     if message.from_user.id != OWNER_ID:
@@ -2245,42 +2295,13 @@ def handle_delivery(message):
             reply_markup=markup
         )
 
-        # Target bot ka caption + cover hata kar apna lagao
-        caption = build_video_caption(sent)
-        media_edited = False
-
-        if REPLACE_COVER and COVER_URL and getattr(sent, "video", None):
-            try:
-                media = types.InputMediaVideo(
-                    media=sent.video.file_id,
-                    caption=caption,
-                    width=getattr(sent.video, "width", None),
-                    height=getattr(sent.video, "height", None),
-                    duration=getattr(sent.video, "duration", None),
-                    supports_streaming=True,
-                    cover=COVER_URL,
-                )
-                bot.edit_message_media(
-                    media=media,
-                    chat_id=target_user_id,
-                    message_id=sent.message_id,
-                    reply_markup=markup,
-                )
-                media_edited = True
-                print(f"[cover] cover badal diya (msg {sent.message_id})")
-            except Exception as e:
-                print(f"[cover] edit_message_media fail: {e}")
-
-        if not media_edited:
-            try:
-                bot.edit_message_caption(
-                    caption=caption,
-                    chat_id=target_user_id,
-                    message_id=sent.message_id,
-                    reply_markup=markup
-                )
-            except Exception as e:
-                print(f"[caption] {e}")
+        # caption + cover background thread me lagao (retry ke saath) taaki
+        # polling block na ho aur badi video "being processed" hone par bhi lag jaaye
+        threading.Thread(
+            target=_finalize_delivery,
+            args=(target_user_id, sent, markup),
+            daemon=True,
+        ).start()
 
         schedule_auto_delete(target_user_id, sent.message_id, AUTO_DELETE_SECONDS)
         

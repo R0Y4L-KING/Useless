@@ -128,7 +128,7 @@ def _validity_text(days):
 def _expiry_text(until, days):
     if int(days) >= LIFETIME_DAYS:
         return "Lifetime access — kabhi expire nahi hoga"
-    return f"{until.strftime('%d %b %Y, %I:%M %p')} (UTC) tak"
+    return f"{_ist(until)} tak"
 
 
 def _plan_line(until):
@@ -575,6 +575,17 @@ except Exception:
 def _now():
     # naive UTC (deprecated utcnow() ki jagah — same behaviour, warning nahi)
     return datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+
+
+IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+
+
+def _ist(dt, fmt="%d %b %Y, %I:%M %p"):
+    """naive UTC datetime -> IST string (user ko IST dikhao)."""
+    try:
+        return dt.replace(tzinfo=datetime.timezone.utc).astimezone(IST).strftime(fmt) + " IST"
+    except Exception:
+        return str(dt)
 
 
 class Store:
@@ -1136,7 +1147,7 @@ def handle_verify_payload(message, token):
         chat_id,
         "✅ **Verification complete!**\n\n"
         f"🎁 Agle **{ADS_REWARD_MINUTES} minute tak UNLIMITED downloads**.\n"
-        f"⏳ Valid till: {until.strftime('%I:%M %p')} (UTC)\n\n"
+        f"⏳ Valid till: {_ist(until, '%I:%M %p')}\n\n"
         "Ab jitni videos chahiye bhejo! 🚀",
         reply_markup=get_main_keyboard(),
         parse_mode="Markdown",
@@ -1826,12 +1837,12 @@ def cmd_grant(message):
     until = grant_premium(user_id, days)
     bot.send_message(
         message.chat.id,
-        f"✅ {user_id} ko {days} din ka premium diya. Expiry: {until.strftime('%d %b %Y, %I:%M %p')} UTC",
+        f"✅ {user_id} ko {days} din ka premium diya. Expiry: {_ist(until)}",
     )
     try:
         bot.send_message(
             user_id,
-            f"💎 Premium activated! Valid till {until.strftime('%d %b %Y, %I:%M %p')} (UTC).",
+            f"💎 Premium activated! Valid till {_ist(until)}.",
         )
     except Exception:
         pass
@@ -2023,7 +2034,7 @@ def admin_input(message):
         until = grant_premium(uid, days)
         bot.send_message(
             chat_id,
-            f"✅ {uid} ko {days} din ka premium diya.\nExpiry: {until.strftime('%d %b %Y, %I:%M %p')} UTC",
+            f"✅ {uid} ko {days} din ka premium diya.\nExpiry: {_ist(until)}",
         )
         try:
             bot.send_message(uid, f"💎 Premium activated! Valid till {until.strftime('%d %b %Y')}.")
@@ -2559,9 +2570,11 @@ def _self_ping_loop():
         print("[keepalive] PUBLIC_URL set nahi hai — self-ping off (UptimeRobot pe depend karega)")
         return
     url = PUBLIC_URL + "/"
-    print(f"[keepalive] self-ping chalu: {url} (har 8 min)")
+    print(f"[keepalive] self-ping chalu: {url} (har 5 min)")
+    first = True
     while True:
-        time.sleep(480)
+        time.sleep(60 if first else 300)
+        first = False
         try:
             r = requests.get(url, timeout=25)
             print(f"[keepalive] ping ok {r.status_code}")

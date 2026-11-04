@@ -417,18 +417,11 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
                     refund_download(user_chat_id, refund_kind)
                     if "premium and ultra" in _low or "fanclub" in _low:
                         _msg = (
-                            "❌ **Ye video supported nahi hai**\n\n"
-                            "Sirf **Premium / Ultra** videos download hoti hain — "
-                            "Fanclub links support nahi hain.\n\n"
-                            "Doosri video ka link bhej do.\n\n"
-                            "_(Aapka download credit wapas kar diya gaya hai.)_"
+                            "We Only Support Premium And Ultra Videos.❣️\n"
+                            "It is Likely That This is a Fanclub Link Which is Not Supported. 🐾"
                         )
                     else:
-                        _msg = (
-                            "❌ **Download Failed!**\n\n"
-                            "Target server par issue hai. Kisi doosri video ka link try karo.\n\n"
-                            "_(Aapka download credit wapas kar diya gaya hai.)_"
-                        )
+                        _msg = "❌ Download Failed. Kripya doosra link try karein."
                     _edit(user_chat_id, call_msg_id, _msg)
                     return False
 
@@ -448,6 +441,20 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
                 continue # Agar progress bar hai, to aage button check karne ki zarurat nahi
 
             # ---> CASE C: Video Aagayi <---
+            # Sirf asli download forward karo — target bot ke promo video/document ignore
+            _is_video = bool(msg.video) or (
+                bool(msg.document)
+                and str(getattr(msg.document, "mime_type", "")).startswith("video")
+            )
+            _is_ours = (
+                ad_clicked
+                or quality_clicked
+                or getattr(msg, "reply_to_msg_id", None) == sent_link.id
+            )
+            if (msg.video or msg.document) and not (_is_video and _is_ours):
+                print("[telethon] promo/unrelated file ignore kiya")
+                continue
+
             if msg.video or msg.document:
                 if msg.id not in forwarded_video_ids:
                     print("[telethon] Video aagayi! Forward kar raha hu...")

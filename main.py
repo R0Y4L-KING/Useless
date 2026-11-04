@@ -355,6 +355,20 @@ async def _send_start_to_target():
     except Exception as e:
         pass
 
+# Target bot ke error messages — inme se koi bhi mile to download fail maan lo
+TARGET_FAIL_PATTERNS = [
+    "ek link fir se bhejo",
+    "we only support premium and ultra",
+    "fanclub link",
+    "is not supported",
+    "not supported",
+    "invalid link",
+    "video not found",
+    "link is invalid",
+    "please report us",
+]
+
+
 async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
     """refund_kind: agar download fail ho to credit/free download wapas karne ke liye.
 
@@ -395,16 +409,28 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
                 continue 
             
             # ---> CASE A: Target bot ne ERROR de diya <---
-            if msg.text and "ek link fir se bhejo" in msg.text.lower():
-                print("[telethon] Target bot fail ho gaya (Error message mila).")
-                refund_download(user_chat_id, refund_kind)
-                _edit(
-                    user_chat_id,
-                    call_msg_id,
-                    "❌ **Download Failed!**\n\nTarget server par issue hai. Kripya koi dusra link try karein.\n\n"
-                    "_(Aapka download credit wapas kar diya gaya hai.)_",
-                )
-                return False
+            if msg.text:
+                _low = msg.text.lower()
+                _hit = next((p for p in TARGET_FAIL_PATTERNS if p in _low), None)
+                if _hit:
+                    print(f"[telethon] Target bot fail ho gaya: '{_hit}'")
+                    refund_download(user_chat_id, refund_kind)
+                    if "premium and ultra" in _low or "fanclub" in _low:
+                        _msg = (
+                            "❌ **Ye video supported nahi hai**\n\n"
+                            "Sirf **Premium / Ultra** videos download hoti hain — "
+                            "Fanclub links support nahi hain.\n\n"
+                            "Doosri video ka link bhej do.\n\n"
+                            "_(Aapka download credit wapas kar diya gaya hai.)_"
+                        )
+                    else:
+                        _msg = (
+                            "❌ **Download Failed!**\n\n"
+                            "Target server par issue hai. Kisi doosri video ka link try karo.\n\n"
+                            "_(Aapka download credit wapas kar diya gaya hai.)_"
+                        )
+                    _edit(user_chat_id, call_msg_id, _msg)
+                    return False
 
             # ---> CASE B: PROGRESS BAR MIRRORING <---
             if msg.text and ("Progress" in msg.text or "Speed:" in msg.text or "ETA:" in msg.text):

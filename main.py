@@ -43,6 +43,8 @@ AUTO_DELETE_SECONDS = int(os.environ.get('AUTO_DELETE_SECONDS', '3600'))
 REPLACE_COVER = os.environ.get('REPLACE_COVER', '1') == '1'
 # Har delivery ke baad owner ko 1 line status (thumbnail laga ya nahi)
 DELIVERY_ALERTS = os.environ.get('DELIVERY_ALERTS', '1') == '1'
+# Owner ko user ki delivered video ka preview copy bhi bhejo (thumbnail check karne ke liye)
+DELIVERY_PREVIEW = os.environ.get('DELIVERY_PREVIEW', '1') == '1'
 COVER_URL = os.environ.get(
     'COVER_URL',
     'https://raw.githubusercontent.com/R0Y4L-KING/Useless/main/cover.jpg',
@@ -2257,6 +2259,17 @@ def process_download(call):
 
 
 # ================= INTERNAL ROUTING =================
+def _owner_preview(user_id, chat_id, message_id, state):
+    """Owner ko exact wahi video ka copy bhejo jo user ko gaya — thumbnail khud dekh lo."""
+    if not DELIVERY_PREVIEW or state == "fail":
+        return
+    try:
+        bot.send_message(OWNER_ID, f"👆 User {user_id} ko ye gaya (preview)")
+        bot.copy_message(OWNER_ID, chat_id, message_id)
+    except Exception as e:
+        print(f"[deliver] preview fail: {e}")
+
+
 def _delivery_status(user_id, msg_id, state):
     """Owner ko 1 line me batao ki thumbnail/caption laga ya nahi."""
     if not DELIVERY_ALERTS:
@@ -2303,6 +2316,7 @@ def _finalize_delivery(chat_id, sent, markup, tries=5):
                 )
                 print(f"[deliver] cover + caption set (try {attempt + 1})")
                 _delivery_status(chat_id, sent.message_id, "cover")
+                _owner_preview(chat_id, chat_id, sent.message_id, "cover")
                 return
             except Exception as e:
                 print(f"[deliver] media try {attempt + 1} fail: {e}")
@@ -2317,6 +2331,7 @@ def _finalize_delivery(chat_id, sent, markup, tries=5):
             )
             print(f"[deliver] caption set (try {attempt + 1})")
             _delivery_status(chat_id, sent.message_id, "caption")
+            _owner_preview(chat_id, chat_id, sent.message_id, "caption")
             return
         except Exception as e:
             print(f"[deliver] caption try {attempt + 1} fail: {e}")

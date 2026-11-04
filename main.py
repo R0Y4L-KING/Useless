@@ -41,6 +41,8 @@ AUTO_DELETE_SECONDS = int(os.environ.get('AUTO_DELETE_SECONDS', '3600'))
 # Video ka cover (poster image) — target bot ki branding hatane ke liye.
 # Koi bhi public JPEG URL chalega; default hamara repo wala cover hai.
 REPLACE_COVER = os.environ.get('REPLACE_COVER', '1') == '1'
+# Target bot ki branding thumbnail (same image baar baar) kitni baar dikhe to cover badlein
+COVER_HASH_MIN = int(os.environ.get('COVER_HASH_MIN', '3'))
 # Har delivery ke baad owner ko 1 line status (thumbnail laga ya nahi)
 DELIVERY_ALERTS = os.environ.get('DELIVERY_ALERTS', '1') == '1'
 # Owner ko user ki delivered video ka preview copy bhi bhejo (thumbnail check karne ke liye)
@@ -2259,6 +2261,58 @@ def process_download(call):
 
 
 # ================= INTERNAL ROUTING =================
+def _thumb_dhash(data):
+    """Thumbnail ka 64-bit perceptual hash (dHash)."""
+    from PIL import Image
+    img = Image.open(io.BytesIO(data)).convert("L").resize((9, 8), Image.LANCZOS)
+    px = list(img.getdata())
+    bits = 0
+    for row in range(8):
+        for col in range(8):
+            left = px[row * 9 + col]
+            right = px[row * 9 + col + 1]
+            bits = (bits << 1) | (1 if left > right else 0)
+    return f"{bits:016x}"
+
+
+def _is_branded_thumb(sent):
+    """True agar video ka thumbnail target bot ki branding hai.
+
+    Asli video ke thumbnails har video me alag hote hain, par target bot ki
+    branding wali image same rehti hai — isliye hash count karte hain. Jo hash
+    COVER_HASH_MIN baar se zyada dikhe, wo branding hai.
+    """
+    vid = getattr(sent, "video", None)
+    if not vid:
+        return False
+    thumb = getattr(vid, "thumbnail", None) or getattr(vid, "thumb", None)
+    if not thumb:
+        return False
+
+    try:
+        f = bot.get_file(thumb.file_id)
+        data = bot.download_file(f.file_path)
+        h = _thumb_dhash(data)
+    except Exception as e:
+        print(f"[thumb] hash fail: {e}")
+        return False
+
+    try:
+        counts = store.get_kv("thumb_hashes") or {}
+    except Exception:
+        counts = {}
+    n = int(counts.get(h, 0)) + 1
+    counts[h] = n
+    try:
+        store.set_kv("thumb_hashes", counts)
+    except Exception as e:
+        print(f"[thumb] save fail: {e}")
+
+    branded = n >= COVER_HASH_MIN
+    print(f"[thumb] hash={h} count={n} branded={branded}")
+    return branded
+
+
 def _owner_preview(user_id, chat_id, message_id, state):
     """Owner ko exact wahi video ka copy bhejo jo user ko gaya — thumbnail khud dekh lo."""
     if not DELIVERY_PREVIEW or state == "fail":
@@ -2291,13 +2345,19 @@ def _finalize_delivery(chat_id, sent, markup, tries=5):
     caption = build_video_caption(sent)
     delays = [0, 4, 8, 12, 18]
 
+    # Cover sirf tab badlo jab thumbnail target bot ki branding ho.
+    # Original thumbnail wali videos ka thumbnail waise hi rehne do.
+    branded = _is_branded_thumb(sent) if (REPLACE_COVER and COVER_URL) else False
+    if not branded:
+        print("[deliver] original thumbnail — cover nahi badlega, sirf caption")
+
     for attempt in range(tries):
         delay = delays[attempt] if attempt < len(delays) else 15
         if delay:
             time.sleep(delay)
 
         # 1) pehle cover + caption ek saath
-        if REPLACE_COVER and COVER_URL and getattr(sent, "video", None):
+        if branded and getattr(sent, "video", None):
             try:
                 media = types.InputMediaVideo(
                     media=sent.video.file_id,

@@ -2278,9 +2278,10 @@ def _thumb_dhash(data):
 def _is_branded_thumb(sent):
     """True agar video ka thumbnail target bot ki branding hai.
 
-    Asli video ke thumbnails har video me alag hote hain, par target bot ki
-    branding wali image same rehti hai — isliye hash count karte hain. Jo hash
-    COVER_HASH_MIN baar se zyada dikhe, wo branding hai.
+    Ek hi image (branding) alag-alag videos pe repeat hoti hai, jabki asli video
+    ka thumbnail us video ke saath hi rehta hai. Isliye hash ke saath ye bhi
+    yaad rakhte hain ki wo hash kitni ALAG videos pe dikha — same video dobara
+    download hone se count nahi badhta.
     """
     vid = getattr(sent, "video", None)
     if not vid:
@@ -2297,19 +2298,29 @@ def _is_branded_thumb(sent):
         print(f"[thumb] hash fail: {e}")
         return False
 
+    # video ki unique id — same video dobara aaye to count nahi badhna chahiye
+    vid_uid = (
+        str(getattr(vid, "file_unique_id", "") or "")
+        or str(getattr(vid, "file_id", ""))[:32]
+    )
+
     try:
-        counts = store.get_kv("thumb_hashes") or {}
+        seen = store.get_kv("thumb_hash_vids") or {}
     except Exception:
-        counts = {}
-    n = int(counts.get(h, 0)) + 1
-    counts[h] = n
+        seen = {}
+
+    vids = list(seen.get(h, []) or [])
+    if vid_uid and vid_uid not in vids and len(vids) < 10:
+        vids.append(vid_uid)
+    seen[h] = vids
     try:
-        store.set_kv("thumb_hashes", counts)
+        store.set_kv("thumb_hash_vids", seen)
     except Exception as e:
         print(f"[thumb] save fail: {e}")
 
-    branded = n >= COVER_HASH_MIN
-    print(f"[thumb] hash={h} count={n} branded={branded}")
+    distinct = len(vids)
+    branded = distinct >= COVER_HASH_MIN
+    print(f"[thumb] hash={h} videos={distinct} branded={branded}")
     return branded
 
 

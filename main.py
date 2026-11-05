@@ -235,18 +235,21 @@ BAR_FRAMES = [
 ]
 
 SPINNER_STAGES = [
-    (0, "Link target bot ko bheja ja raha hai"),
-    (8, "Video check ho rahi hai"),
-    (25, "Download shuru ho raha hai"),
-    (60, "Server se video aa rahi hai"),
-    (120, "Badi file hai, thoda time lagega"),
+    (0, "Connecting to server"),
+    (8, "Checking video"),
+    (20, "Downloading video"),
+    (70, "Uploading video"),
+    (150, "Badi file hai, thoda time lagega"),
 ]
 
+# Target bot jaisa hi format: bar + percent + size/speed/elapsed
 SPINNER_TEXT = (
-    "⏳ **{stage}...**\n\n"
-    "`{bar}`  {secs}s\n\n"
-    "💎 **Premium lo — no waiting, instant downloads!**"
+    "📥 **{stage}**\n\n"
+    "{bar}  {pct}%\n\n"
+    "{detail}"
 )
+
+BAR_LEN = 14
 
 
 def _spinner_stage(secs):
@@ -256,12 +259,29 @@ def _spinner_stage(secs):
             stage = text
     return stage
 
+
+def _waiting_bar(pct):
+    filled = max(0, min(BAR_LEN, int(round(BAR_LEN * pct / 100))))
+    return "█" * filled + "▒" * (BAR_LEN - filled)
+
+
+def _waiting_text(elapsed, pct=None):
+    """Target bot ke message jaisa hi loading screen (real data aane tak)."""
+    if pct is None:
+        # 0 se 92% tak dheere badhta hai (approx 45s), uske baad ruk jaata hai
+        pct = min(92, int(elapsed * 2.0))
+    stage = _spinner_stage(elapsed)
+    detail = f"⏱ Time Elapsed: {elapsed}s"
+    return SPINNER_TEXT.format(
+        stage=stage, bar=_waiting_bar(pct), pct=f"{pct}.00", detail=detail
+    )
+
 _spinners = {}
 _spinners_lock = threading.Lock()
 
 
-def start_spinner(chat_id, message_id, interval=1.6):
-    """Message ko continuously animate karta hai jab tak stop na ho."""
+def start_spinner(chat_id, message_id, interval=2.0):
+    """Message ko target bot jaisi progress animation me badalta rehta hai."""
     stop_event = threading.Event()
     key = (chat_id, message_id)
 
@@ -274,23 +294,17 @@ def start_spinner(chat_id, message_id, interval=1.6):
     started = time.time()
 
     def animate():
-        i = 0
         while not stop_event.is_set():
             secs = int(time.time() - started)
             try:
                 bot.edit_message_text(
-                    SPINNER_TEXT.format(
-                        bar=BAR_FRAMES[i % len(BAR_FRAMES)],
-                        secs=secs,
-                        stage=_spinner_stage(secs),
-                    ),
+                    _waiting_text(secs),
                     chat_id=chat_id,
                     message_id=message_id,
                     parse_mode="Markdown",
                 )
             except Exception:
                 pass
-            i += 1
             stop_event.wait(interval)
         with _spinners_lock:
             if _spinners.get(key) is stop_event:
@@ -443,7 +457,7 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
     hain, warna doosre user ki video bhi pakdi ja sakti hai.
     """
     # apni baari aayi — status message pe animation wapas chalu karo
-    _edit(user_chat_id, call_msg_id, SPINNER_TEXT.format(bar=BAR_FRAMES[0]))
+    _edit(user_chat_id, call_msg_id, _waiting_text(0))
     start_spinner(user_chat_id, call_msg_id)
 
     target_entity = await client.get_entity(TARGET_BOT)
@@ -2416,7 +2430,7 @@ def begin_download(chat_id, url=None):
     try:
         msg = bot.send_message(
             chat_id,
-            SPINNER_TEXT.format(bar=BAR_FRAMES[0]),
+            _waiting_text(0),
             parse_mode="Markdown",
         )
         status_id = msg.message_id

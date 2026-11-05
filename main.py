@@ -491,7 +491,10 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
                 continue # Agar progress bar hai, to aage button check karne ki zarurat nahi
 
             # ---> CASE C: Video Aagayi <---
-            # Sirf asli download forward karo — target bot ke promo video/document ignore
+            # Kuch target bots seedha video bhej dete hain (koi button/reply nahi),
+            # isliye normal video message ko accept karte hain. Chhoti clips
+            # (promo) aur non-video documents ignore hote hain.
+            _dur = int(getattr(msg.video, "duration", 0) or 0) if msg.video else 0
             _is_video = bool(msg.video) or (
                 bool(msg.document)
                 and str(getattr(msg.document, "mime_type", "")).startswith("video")
@@ -500,9 +503,15 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
                 ad_clicked
                 or quality_clicked
                 or getattr(msg, "reply_to_msg_id", None) == sent_link.id
+                or _dur >= 10          # asli video (promo clips chhote hote hain)
+                or bool(msg.document)  # document ke roop me aayi video
             )
             if (msg.video or msg.document) and not (_is_video and _is_ours):
-                print("[telethon] promo/unrelated file ignore kiya")
+                print(
+                    f"[telethon] file ignore kiya (video={bool(msg.video)} dur={_dur} "
+                    f"reply={getattr(msg, 'reply_to_msg_id', None)} ad={ad_clicked} "
+                    f"quality={quality_clicked})"
+                )
                 continue
 
             if msg.video or msg.document:

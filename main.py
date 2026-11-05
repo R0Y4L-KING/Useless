@@ -37,6 +37,8 @@ PORT = int(os.environ.get('PORT', '8080'))
 
 # Delivered video kitni der baad delete ho (seconds). 0 = kabhi delete nahi.
 AUTO_DELETE_SECONDS = int(os.environ.get('AUTO_DELETE_SECONDS', '3600'))
+# Ek download job max itne second chal sakti hai (uske baad timeout)
+JOB_TIMEOUT_SEC = int(os.environ.get('JOB_TIMEOUT_SEC', '300'))
 
 # Video ka cover (poster image) — target bot ki branding hatane ke liye.
 # Koi bhi public JPEG URL chalega; default hamara repo wala cover hai.
@@ -190,6 +192,12 @@ elif _detected_username:
     MAIN_BOT_USERNAME = f"@{_detected_username}"
 else:
     MAIN_BOT_USERNAME = "@YourBotUsername"
+
+# Bot ki numeric id — username galat/miss ho to bhi userbot entity resolve kar le
+try:
+    BOT_ID = int(bot.get_me().id)
+except Exception:
+    BOT_ID = 0
 
 loop = asyncio.new_event_loop()
 client = TelegramClient(StringSession(SESSION_STR), API_ID, API_HASH, loop=loop)
@@ -387,7 +395,7 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
     start_spinner(user_chat_id, call_msg_id)
 
     target_entity = await client.get_entity(TARGET_BOT)
-    main_bot_entity = await client.get_entity(MAIN_BOT_USERNAME)
+    main_bot_entity = await _main_bot_entity()
 
     await client.send_message(target_entity, "/start")
     await asyncio.sleep(0.7)
@@ -570,12 +578,32 @@ async def _enqueue_job(job):
     await job_queue.put(job)
 
 
+async def _main_bot_entity():
+    """Main bot ki entity — pehle numeric id se (reliable), phir username se."""
+    if BOT_ID:
+        try:
+            return await client.get_entity(BOT_ID)
+        except Exception as e:
+            print(f"[telethon] entity by id fail: {e}")
+    return await client.get_entity(MAIN_BOT_USERNAME)
+
+
 async def _download_worker():
     print("[queue] download worker ready (ek waqt me ek download)")
     while True:
         job = await job_queue.get()
         try:
-            await _fetch_from_target(**job)
+            await asyncio.wait_for(
+                _fetch_from_target(**job), timeout=JOB_TIMEOUT_SEC
+            )
+        except asyncio.TimeoutError:
+            print(f"[queue] job timeout ({JOB_TIMEOUT_SEC}s) — user {job.get('user_chat_id')}")
+            refund_download(job["user_chat_id"], job.get("refund_kind", ""))
+            _edit(
+                job["user_chat_id"],
+                job["call_msg_id"],
+                "❌ Download start nahi ho paaya (timeout). Link dobara bhejo.",
+            )
         except Exception as e:
             print(f"[queue] job fail: {e}")
             try:
@@ -594,10 +622,31 @@ async def _download_worker():
 def start_telethon_thread():
     global job_queue
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(client.connect())
+
+    while True:
+        try:
+            loop.run_until_complete(client.connect())
+            me = loop.run_until_complete(client.get_me())
+            if me is None:
+                print("[telethon] SESSION authorized nahi hai — SESSION_STR dobara banao")
+                try:
+                    bot.send_message(
+                        OWNER_ID,
+                        "⚠️ Userbot session authorized nahi hai. Naya SESSION_STR banao, "
+                        "warna downloads start nahi honge.",
+                    )
+                except Exception:
+                    pass
+            else:
+                print(f"[telethon] userbot connected: {me.first_name} (id {me.id})")
+            break
+        except Exception as e:
+            print(f"[telethon] connect fail: {e} — 30s me retry")
+            time.sleep(30)
+
     job_queue = asyncio.Queue()
     loop.create_task(_download_worker())
-    print("Userbot Session Active...") 
+    print("Userbot Session Active...")
     loop.run_forever()
 
 threading.Thread(target=start_telethon_thread, daemon=True).start()
@@ -1933,6 +1982,29 @@ def register_user(message):
         print(f"[users] register fail: {e}")
 
 
+@bot.message_handler(commands=['health'])
+def cmd_health(message):
+    if message.from_user.id != OWNER_ID:
+        return
+    q = job_queue.qsize() if job_queue is not None else -1
+    try:
+        connected = client.is_connected()
+    except Exception:
+        connected = "?"
+    text = (
+        "🩺 **Bot Health**\n\n"
+        f"Userbot: {'connected' if connected is True else connected}\n"
+        f"Queue: {'NOT STARTED' if job_queue is None else 'ready'}\n"
+        f"Queue me: {max(q, 0)}\n"
+        f"Bot id: {BOT_ID}\n"
+        f"Username: {MAIN_BOT_USERNAME}\n"
+        f"Target bot: {TARGET_BOT}\n"
+        f"DB: {'MongoDB' if store._users is not None else 'local JSON'}\n"
+        f"PUBLIC_URL: {PUBLIC_URL or 'MISSING'}"
+    )
+    bot.send_message(message.chat.id, text, parse_mode="Markdown")
+
+
 @bot.message_handler(commands=['alive', 'ping'])
 def cmd_alive(message):
     bot.send_message(
@@ -2234,9 +2306,23 @@ def begin_download(chat_id, url=None):
         status_id = msg.message_id
     except Exception as e:
         print(f"[download] status msg fail: {e}")
+        refund_download(chat_id, info)
         return
 
     start_spinner(chat_id, status_id)
+
+    if job_queue is None:
+        print("[download] job_queue ready nahi hai (userbot connect nahi hua)")
+        stop_spinner(chat_id, status_id)
+        refund_download(chat_id, info)
+        _edit(
+            chat_id,
+            status_id,
+            "⚠️ Downloader abhi start ho raha hai (userbot connect nahi hua).\n\n"
+            "1 minute baad link dobara bhejo.",
+        )
+        return
+
     asyncio.run_coroutine_threadsafe(
         _enqueue_job({
             "url": url,

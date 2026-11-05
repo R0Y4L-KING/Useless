@@ -234,30 +234,16 @@ BAR_FRAMES = [
     "▱▱▱▱▱▱▱▰",
 ]
 
-SPINNER_STAGES = [
-    (0, "Connecting to server"),
-    (8, "Checking video"),
-    (20, "Downloading video"),
-    (70, "Uploading video"),
-    (150, "Badi file hai, thoda time lagega"),
+# Target bot ke exact stages — user ko wahi process dikhta hai
+WAIT_STAGES = [
+    (0, "plain", "🔍 [1/1]"),
+    (6, "plain", "⚙️ Checking video codecs & optimizing..."),
+    (20, "bar", "📥 Downloading video"),
+    (95, "bar", "📥 ⚡ High-Speed Uploading..."),
+    (170, "bar", "📥 Uploading... thoda time lagega"),
 ]
 
-# Target bot jaisa hi format: bar + percent + size/speed/elapsed
-SPINNER_TEXT = (
-    "📥 **{stage}**\n\n"
-    "{bar}  {pct}%\n\n"
-    "{detail}"
-)
-
-BAR_LEN = 14
-
-
-def _spinner_stage(secs):
-    stage = SPINNER_STAGES[0][1]
-    for after, text in SPINNER_STAGES:
-        if secs >= after:
-            stage = text
-    return stage
+BAR_LEN = 22
 
 
 def _waiting_bar(pct):
@@ -266,14 +252,22 @@ def _waiting_bar(pct):
 
 
 def _waiting_text(elapsed, pct=None):
-    """Target bot ke message jaisa hi loading screen (real data aane tak)."""
+    """Target bot jaisa hi loading process (real progress aane tak)."""
+    kind, header, base = WAIT_STAGES[0][1], WAIT_STAGES[0][2], 0
+    for after, k, h in WAIT_STAGES:
+        if elapsed >= after:
+            kind, header, base = k, h, after
+
+    if kind == "plain":
+        return header
+
     if pct is None:
-        # 0 se 92% tak dheere badhta hai (approx 45s), uske baad ruk jaata hai
-        pct = min(92, int(elapsed * 2.0))
-    stage = _spinner_stage(elapsed)
-    detail = f"⏱ Time Elapsed: {elapsed}s"
-    return SPINNER_TEXT.format(
-        stage=stage, bar=_waiting_bar(pct), pct=f"{pct}.00", detail=detail
+        pct = min(95, int(elapsed * 0.55))   # hamesha badhta hua, monotonic
+
+    return (
+        f"{header}\n\n"
+        f"{_waiting_bar(pct)}  {pct}.00%\n\n"
+        f"⏱ Time Elapsed: {elapsed}s"
     )
 
 _spinners = {}

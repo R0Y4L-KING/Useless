@@ -1991,18 +1991,26 @@ def cmd_health(message):
         connected = client.is_connected()
     except Exception:
         connected = "?"
-    text = (
-        "🩺 **Bot Health**\n\n"
-        f"Userbot: {'connected' if connected is True else connected}\n"
-        f"Queue: {'NOT STARTED' if job_queue is None else 'ready'}\n"
-        f"Queue me: {max(q, 0)}\n"
-        f"Bot id: {BOT_ID}\n"
-        f"Username: {MAIN_BOT_USERNAME}\n"
-        f"Target bot: {TARGET_BOT}\n"
-        f"DB: {'MongoDB' if store._users is not None else 'local JSON'}\n"
-        f"PUBLIC_URL: {PUBLIC_URL or 'MISSING'}"
-    )
-    bot.send_message(message.chat.id, text, parse_mode="Markdown")
+
+    src = "env se" if os.environ.get('TARGET_BOT') else "DEFAULT — env me TARGET_BOT set karo"
+    same_bot = TARGET_BOT.lstrip("@").lower() == MAIN_BOT_USERNAME.lstrip("@").lower()
+
+    lines = [
+        "🩺 Bot Health",
+        "",
+        f"Userbot: {'connected' if connected is True else connected}",
+        f"Queue: {'NOT STARTED' if job_queue is None else 'ready'} (me: {max(q, 0)})",
+        f"Bot id: {BOT_ID}",
+        f"Username: {MAIN_BOT_USERNAME}",
+        f"Target bot: {TARGET_BOT} ({src})",
+        f"DB: {'MongoDB' if store._users is not None else 'local JSON'}",
+        f"PUBLIC_URL: {PUBLIC_URL or 'MISSING'}",
+    ]
+    if same_bot:
+        lines.append("")
+        lines.append("⚠️ Target bot tumhara hi bot hai — TARGET_BOT galat set hai!")
+
+    bot.send_message(message.chat.id, "\n".join(lines))
 
 
 @bot.message_handler(commands=['alive', 'ping'])

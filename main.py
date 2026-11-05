@@ -129,7 +129,7 @@ PLANS = {
 }
 
 # Verification screen ka tutorial link
-TUT_VID = os.environ.get('TUT_VID', 'https://t.me/H0W_2_USE/84')
+TUT_VID = os.environ.get('TUT_VID', 'https://t.me/H0W_2_USE/85')
 
 
 def _validity_text(days):

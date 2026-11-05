@@ -383,6 +383,26 @@ TARGET_FAIL_PATTERNS = [
 ]
 
 
+async def _safe_send(entity, text):
+    """FloodWait aaye to ruk kar dobara bhejo (bahut users ek saath ho to aata hai)."""
+    try:
+        from telethon.errors import FloodWaitError
+    except Exception:
+        FloodWaitError = ()
+
+    for attempt in range(3):
+        try:
+            return await client.send_message(entity, text)
+        except FloodWaitError as e:
+            wait = min(int(getattr(e, "seconds", 30)) + 2, 90)
+            print(f"[telethon] FloodWait {wait}s (attempt {attempt + 1}) — wait kar rahe hain")
+            await asyncio.sleep(wait)
+        except Exception as e:
+            print(f"[telethon] send fail: {e}")
+            raise
+    return await client.send_message(entity, text)
+
+
 async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
     """refund_kind: agar download fail ho to credit/free download wapas karne ke liye.
 
@@ -397,10 +417,10 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
     target_entity = await client.get_entity(TARGET_BOT)
     main_bot_entity = await _main_bot_entity()
 
-    await client.send_message(target_entity, "/start")
+    await _safe_send(target_entity, "/start")
     await asyncio.sleep(0.7)
 
-    sent_link = await client.send_message(target_entity, url)
+    sent_link = await _safe_send(target_entity, url)
     last_seen_id = sent_link.id
     print(f"[telethon] Link sent to target bot for user {user_chat_id} (msg {last_seen_id})")
 
@@ -413,7 +433,14 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
     for _ in range(160): 
         await asyncio.sleep(1.5)  # Fast check (total ~4 min)
         # sirf apne link ke baad aaye messages (min_id) — purane/doosre user ke nahi
-        history = await client.get_messages(target_entity, limit=10, min_id=last_seen_id)
+        try:
+            history = await client.get_messages(
+                target_entity, limit=10, min_id=last_seen_id
+            )
+        except Exception as e:
+            print(f"[telethon] get_messages fail: {e}")
+            await asyncio.sleep(3)
+            continue
         history = list(reversed(history))  # purane pehle
 
         for msg in history:
@@ -558,23 +585,55 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
 # target bot ka state mix ho jaata tha aur video galat user ko chali jaati thi.
 # Isliye ab har download queue me jaati hai aur worker ek-ek karke chalata hai.
 job_queue = None
+worker_busy = False        # worker abhi ek job chala raha hai?
+active_users = set()       # jinke download chal rahe/queue me hain
+MAX_QUEUE = int(os.environ.get('MAX_QUEUE', '15'))
 
 
 async def _enqueue_job(job):
     """Queue me daalo aur user ko uski position batao."""
+    global worker_busy
+
+    user_id = job["user_chat_id"]
+    msg_id = job["call_msg_id"]
+
     if job_queue is None:
         print("[queue] queue ready nahi hai")
-        _edit(job["user_chat_id"], job["call_msg_id"], "⏳ Bot start ho raha hai — link 10 second baad dobara bhejo.")
-        refund_download(job["user_chat_id"], job.get("refund_kind", ""))
+        _edit(user_id, msg_id, "⏳ Bot start ho raha hai — link 10 second baad dobara bhejo.")
+        refund_download(user_id, job.get("refund_kind", ""))
         return
-    pos = job_queue.qsize() + 1
+
+    # ek user ka ek hi download ek waqt me
+    if user_id in active_users:
+        _edit(
+            user_id,
+            msg_id,
+            "⏳ Aapka ek download already chal raha hai.\n\n"
+            "Uske khatam hone ke baad naya link bhejo.",
+        )
+        refund_download(user_id, job.get("refund_kind", ""))
+        return
+
+    # queue full — load zyada
+    if job_queue.qsize() >= MAX_QUEUE:
+        _edit(
+            user_id,
+            msg_id,
+            "🚦 Abhi bahut load hai.\n\nThodi der (2-3 minute) baad link dobara bhejo.",
+        )
+        refund_download(user_id, job.get("refund_kind", ""))
+        return
+
+    pos = job_queue.qsize() + (2 if worker_busy else 1)
     if pos > 1:
         _edit(
-            job["user_chat_id"],
-            job["call_msg_id"],
-            f"🕒 **Aap queue me hain**\n\nAapse pehle {pos - 1} download chal rahi hai. "
+            user_id,
+            msg_id,
+            f"🕒 **Aap queue me hain**\n\nAapse pehle {pos - 1} download baaki hai. "
             "Aapki baari aate hi apne aap shuru ho jaayega — link dobara mat bhejo.",
         )
+
+    active_users.add(user_id)
     await job_queue.put(job)
 
 
@@ -589,9 +648,11 @@ async def _main_bot_entity():
 
 
 async def _download_worker():
+    global worker_busy
     print("[queue] download worker ready (ek waqt me ek download)")
     while True:
         job = await job_queue.get()
+        worker_busy = True
         try:
             await asyncio.wait_for(
                 _fetch_from_target(**job), timeout=JOB_TIMEOUT_SEC
@@ -616,6 +677,8 @@ async def _download_worker():
             except Exception:
                 pass
         finally:
+            worker_busy = False
+            active_users.discard(job.get("user_chat_id"))
             job_queue.task_done()
 
 

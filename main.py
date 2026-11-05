@@ -55,9 +55,9 @@ REPLACE_COVER = os.environ.get('REPLACE_COVER', '1') == '1'
 # Target bot ki branding thumbnail (same image baar baar) kitni baar dikhe to cover badlein
 COVER_HASH_MIN = int(os.environ.get('COVER_HASH_MIN', '3'))
 # Har delivery ke baad owner ko 1 line status (thumbnail laga ya nahi)
-DELIVERY_ALERTS = os.environ.get('DELIVERY_ALERTS', '1') == '1'
+DELIVERY_ALERTS = os.environ.get('DELIVERY_ALERTS', '0') == '1'
 # Owner ko user ki delivered video ka preview copy bhi bhejo (thumbnail check karne ke liye)
-DELIVERY_PREVIEW = os.environ.get('DELIVERY_PREVIEW', '1') == '1'
+DELIVERY_PREVIEW = os.environ.get('DELIVERY_PREVIEW', '0') == '1'
 COVER_URL = os.environ.get(
     'COVER_URL',
     'https://raw.githubusercontent.com/R0Y4L-KING/Useless/main/cover.jpg',
@@ -234,11 +234,27 @@ BAR_FRAMES = [
     "▱▱▱▱▱▱▱▰",
 ]
 
+SPINNER_STAGES = [
+    (0, "Link target bot ko bheja ja raha hai"),
+    (8, "Video check ho rahi hai"),
+    (25, "Download shuru ho raha hai"),
+    (60, "Server se video aa rahi hai"),
+    (120, "Badi file hai, thoda time lagega"),
+]
+
 SPINNER_TEXT = (
-    "⏳ **Video connect ho rahi hai...**\n\n"
-    "`{bar}`\n\n"
+    "⏳ **{stage}...**\n\n"
+    "`{bar}`  {secs}s\n\n"
     "💎 **Premium lo — no waiting, instant downloads!**"
 )
+
+
+def _spinner_stage(secs):
+    stage = SPINNER_STAGES[0][1]
+    for after, text in SPINNER_STAGES:
+        if secs >= after:
+            stage = text
+    return stage
 
 _spinners = {}
 _spinners_lock = threading.Lock()
@@ -255,12 +271,19 @@ def start_spinner(chat_id, message_id, interval=1.6):
             old.set()
         _spinners[key] = stop_event
 
+    started = time.time()
+
     def animate():
         i = 0
         while not stop_event.is_set():
+            secs = int(time.time() - started)
             try:
                 bot.edit_message_text(
-                    SPINNER_TEXT.format(bar=BAR_FRAMES[i % len(BAR_FRAMES)]),
+                    SPINNER_TEXT.format(
+                        bar=BAR_FRAMES[i % len(BAR_FRAMES)],
+                        secs=secs,
+                        stage=_spinner_stage(secs),
+                    ),
                     chat_id=chat_id,
                     message_id=message_id,
                     parse_mode="Markdown",
@@ -476,7 +499,11 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
                     return False
 
             # ---> CASE B: PROGRESS BAR MIRRORING <---
-            if msg.text and ("Progress" in msg.text or "Speed:" in msg.text or "ETA:" in msg.text):
+            _low_txt = (msg.text or "").lower()
+            if msg.text and any(k in _low_txt for k in (
+                "progress", "speed", "eta", "uploading", "downloading",
+                "done:", "total:", "true size", "elapsed", "%"
+            )):
                 progress_text = msg.text
                 if progress_text != last_progress_text:
                     plan_markup = types.InlineKeyboardMarkup()
@@ -484,7 +511,7 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
                     _edit(
                         user_chat_id,
                         call_msg_id,
-                        f"{progress_text}\n\n⚡ Multiple videos ek saath download karna hai?\nPremium le lo!",
+                        f"{progress_text}\n\n💎 **Premium lo — no waiting, instant downloads!**",
                         reply_markup=plan_markup,
                     )
                     last_progress_text = progress_text

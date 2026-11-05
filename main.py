@@ -1,3 +1,12 @@
+import sys
+
+# Render ke logs me prints turant dikhein (warna buffer me atke rehte hain)
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
 import threading
 import asyncio
 import hashlib

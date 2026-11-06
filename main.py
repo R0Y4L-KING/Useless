@@ -49,19 +49,10 @@ AUTO_DELETE_SECONDS = int(os.environ.get('AUTO_DELETE_SECONDS', '3600'))
 # Ek download job max itne second chal sakti hai (uske baad timeout)
 JOB_TIMEOUT_SEC = int(os.environ.get('JOB_TIMEOUT_SEC', '300'))
 
-# Video ka cover (poster image) — target bot ki branding hatane ke liye.
-# Koi bhi public JPEG URL chalega; default hamara repo wala cover hai.
-REPLACE_COVER = os.environ.get('REPLACE_COVER', '1') == '1'
-# Target bot ki branding thumbnail (same image baar baar) kitni baar dikhe to cover badlein
-COVER_HASH_MIN = int(os.environ.get('COVER_HASH_MIN', '3'))
 # Har delivery ke baad owner ko 1 line status (thumbnail laga ya nahi)
 DELIVERY_ALERTS = os.environ.get('DELIVERY_ALERTS', '0') == '1'
 # Owner ko user ki delivered video ka preview copy bhi bhejo (thumbnail check karne ke liye)
 DELIVERY_PREVIEW = os.environ.get('DELIVERY_PREVIEW', '0') == '1'
-COVER_URL = os.environ.get(
-    'COVER_URL',
-    'https://raw.githubusercontent.com/R0Y4L-KING/Useless/main/cover.jpg',
-)
 
 # ---- Premium / payment (UPI only, koi crypto nahi) ----
 UPI_ID = os.environ.get('UPI_ID', '20213904@axl')
@@ -235,38 +226,25 @@ BAR_FRAMES = [
 ]
 
 # Target bot ke exact stages — user ko wahi process dikhta hai
-WAIT_STAGES = [
-    (0, "plain", "🔍 [1/1]"),
-    (6, "plain", "⚙️ Checking video codecs & optimizing..."),
-    (20, "bar", "📥 Downloading video"),
-    (95, "bar", "📥 ⚡ High-Speed Uploading..."),
-    (170, "bar", "📥 Uploading... thoda time lagega"),
-]
-
+# Loading screen: koi fake "Downloading/Uploading" ya fake % nahi — sirf
+# indeterminate bar + elapsed time. Jaise hi target bot apna asli progress
+# bhejta hai (Downloading 33% / Uploading 78%), wahi jaisa hai waisa dikhta hai.
 BAR_LEN = 22
 
 
-def _waiting_bar(pct):
-    filled = max(0, min(BAR_LEN, int(round(BAR_LEN * pct / 100))))
-    return "█" * filled + "▒" * (BAR_LEN - filled)
+def _waiting_bar(pos):
+    """pos 0..BAR_LEN — ek block aage-peeche chalta hai (indeterminate)."""
+    bar = ["░"] * BAR_LEN
+    for i in range(4):
+        idx = (pos + i) % BAR_LEN
+        bar[idx] = "█"
+    return "".join(bar)
 
 
-def _waiting_text(elapsed, pct=None):
-    """Target bot jaisa hi loading process (real progress aane tak)."""
-    kind, header, base = WAIT_STAGES[0][1], WAIT_STAGES[0][2], 0
-    for after, k, h in WAIT_STAGES:
-        if elapsed >= after:
-            kind, header, base = k, h, after
-
-    if kind == "plain":
-        return header
-
-    if pct is None:
-        pct = min(95, int(elapsed * 0.55))   # hamesha badhta hua, monotonic
-
+def _waiting_text(elapsed, pos=0):
     return (
-        f"{header}\n\n"
-        f"{_waiting_bar(pct)}  {pct}.00%\n\n"
+        "⏳ Video process ho rahi hai...\n\n"
+        f"{_waiting_bar(pos)}\n\n"
         f"⏱ Time Elapsed: {elapsed}s"
     )
 
@@ -288,11 +266,13 @@ def start_spinner(chat_id, message_id, interval=2.0):
     started = time.time()
 
     def animate():
+        pos = 0
         while not stop_event.is_set():
             secs = int(time.time() - started)
+            pos += 1
             try:
                 bot.edit_message_text(
-                    _waiting_text(secs),
+                    _waiting_text(secs, pos),
                     chat_id=chat_id,
                     message_id=message_id,
                     parse_mode="Markdown",
@@ -510,7 +490,8 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
             _low_txt = (msg.text or "").lower()
             if msg.text and any(k in _low_txt for k in (
                 "progress", "speed", "eta", "uploading", "downloading",
-                "done:", "total:", "true size", "elapsed", "%"
+                "done:", "total:", "true size", "elapsed", "%",
+                "codec", "optimiz", "checking video", "high-speed", "upload"
             )):
                 progress_text = msg.text
                 if progress_text != last_progress_text:
@@ -2098,27 +2079,6 @@ def register_user(message):
         print(f"[users] register fail: {e}")
 
 
-@bot.message_handler(commands=['cover'])
-def cmd_cover(message):
-    if message.from_user.id != OWNER_ID:
-        return
-    parts = (message.text or "").split()
-    mode = parts[1].lower() if len(parts) > 1 else ""
-    if mode not in ("auto", "always", "never"):
-        cur = (store.get_kv("cover_mode") or {}).get("mode", "auto")
-        bot.send_message(
-            message.chat.id,
-            f"Cover mode abhi: {cur}\n\n"
-            "Badalne ke liye:\n"
-            "/cover always — har video ka thumbnail apna laga do\n"
-            "/cover auto — sirf jab target bot ki branding ho\n"
-            "/cover never — thumbnail kabhi na badlo",
-        )
-        return
-    store.set_kv("cover_mode", {"mode": mode})
-    bot.send_message(message.chat.id, f"✅ Cover mode: {mode}")
-
-
 @bot.message_handler(commands=['health'])
 def cmd_health(message):
     if message.from_user.id != OWNER_ID:
@@ -2492,89 +2452,6 @@ def process_download(call):
 
 
 # ================= INTERNAL ROUTING =================
-def _thumb_dhash(data):
-    """Thumbnail ka 64-bit perceptual hash (dHash)."""
-    from PIL import Image
-    img = Image.open(io.BytesIO(data)).convert("L").resize((9, 8), Image.LANCZOS)
-    px = list(img.getdata())
-    bits = 0
-    for row in range(8):
-        for col in range(8):
-            left = px[row * 9 + col]
-            right = px[row * 9 + col + 1]
-            bits = (bits << 1) | (1 if left > right else 0)
-    return f"{bits:016x}"
-
-
-def _hamming(a, b):
-    try:
-        return bin(int(a, 16) ^ int(b, 16)).count("1")
-    except Exception:
-        return 99
-
-
-def _is_branded_thumb(sent):
-    """True agar video ka thumbnail target bot ki branding hai.
-
-    Ek hi image (branding) alag-alag videos pe repeat hoti hai, jabki asli video
-    ka thumbnail us video ke saath hi rehta hai. Telegram har baar thumbnail ko
-    dobara encode karta hai, isliye exact hash match nahi hota — Hamming distance
-    se milate hain, aur sirf ALAG videos ginte hain.
-    """
-    vid = getattr(sent, "video", None)
-    if not vid:
-        return False
-    thumb = getattr(vid, "thumbnail", None) or getattr(vid, "thumb", None)
-    if not thumb:
-        return False
-
-    try:
-        f = bot.get_file(thumb.file_id)
-        data = bot.download_file(f.file_path)
-        h = _thumb_dhash(data)
-    except Exception as e:
-        print(f"[thumb] hash fail: {e}")
-        return False
-
-    vid_uid = (
-        str(getattr(vid, "file_unique_id", "") or "")
-        or str(getattr(vid, "file_id", ""))[:32]
-    )
-
-    try:
-        seen = store.get_kv("thumb_hash_vids") or {}
-    except Exception:
-        seen = {}
-
-    entries = seen.get("items")
-    if not isinstance(entries, list):
-        # purane format (dict) se migrate karo
-        entries = [{"h": k, "vids": list(v or [])} for k, v in seen.items() if isinstance(v, list)]
-
-    match = None
-    for e in entries:
-        if _hamming(e.get("h", ""), h) <= 4:
-            match = e
-            break
-    if match is None:
-        match = {"h": h, "vids": []}
-        entries.append(match)
-
-    if vid_uid and vid_uid not in match["vids"] and len(match["vids"]) < 10:
-        match["vids"].append(vid_uid)
-
-    seen = {"items": entries[-60:]}
-    try:
-        store.set_kv("thumb_hash_vids", seen)
-    except Exception as e:
-        print(f"[thumb] save fail: {e}")
-
-    distinct = len(match["vids"])
-    branded = distinct >= COVER_HASH_MIN
-    print(f"[thumb] hash={h} videos={distinct} branded={branded}")
-    return branded
-
-
 def _owner_preview(user_id, chat_id, message_id, state):
     """Owner ko exact wahi video ka copy bhejo jo user ko gaya — thumbnail khud dekh lo."""
     if not DELIVERY_PREVIEW or state == "fail":
@@ -2602,57 +2479,15 @@ def _delivery_status(user_id, msg_id, state):
 
 
 def _finalize_delivery(chat_id, sent, markup, tries=5):
-    """Target bot ka caption + cover hatao. Badi video pe Telegram edit reject
-    kar deta hai (video abhi process ho rahi hoti hai), isliye retry karte hain."""
+    """Target bot ka caption hatao aur apna lagao. Badi video pe Telegram edit
+    reject kar deta hai (video abhi process ho rahi hoti hai), isliye retry."""
     caption = build_video_caption(sent)
     delays = [0, 4, 8, 12, 18]
-
-    # Cover mode: auto (branding detect ho to) / always / never
-    mode = "auto"
-    try:
-        mode = (store.get_kv("cover_mode") or {}).get("mode", "auto")
-    except Exception:
-        pass
-    if mode == "always":
-        branded = True
-    elif mode == "never":
-        branded = False
-    else:
-        branded = _is_branded_thumb(sent) if (REPLACE_COVER and COVER_URL) else False
-    if not branded:
-        print("[deliver] original thumbnail — cover nahi badlega, sirf caption")
 
     for attempt in range(tries):
         delay = delays[attempt] if attempt < len(delays) else 15
         if delay:
             time.sleep(delay)
-
-        # 1) pehle cover + caption ek saath
-        if branded and getattr(sent, "video", None):
-            try:
-                media = types.InputMediaVideo(
-                    media=sent.video.file_id,
-                    caption=caption,
-                    width=getattr(sent.video, "width", None),
-                    height=getattr(sent.video, "height", None),
-                    duration=getattr(sent.video, "duration", None),
-                    supports_streaming=True,
-                    cover=COVER_URL,
-                )
-                bot.edit_message_media(
-                    media=media,
-                    chat_id=chat_id,
-                    message_id=sent.message_id,
-                    reply_markup=markup,
-                )
-                print(f"[deliver] cover + caption set (try {attempt + 1})")
-                _delivery_status(chat_id, sent.message_id, "cover")
-                _owner_preview(chat_id, chat_id, sent.message_id, "cover")
-                return
-            except Exception as e:
-                print(f"[deliver] media try {attempt + 1} fail: {e}")
-
-        # 2) cover na lage to kam se kam caption to lag jaaye
         try:
             bot.edit_message_caption(
                 caption=caption,
@@ -2667,7 +2502,7 @@ def _finalize_delivery(chat_id, sent, markup, tries=5):
         except Exception as e:
             print(f"[deliver] caption try {attempt + 1} fail: {e}")
 
-    print(f"[deliver] caption/cover set nahi ho paaya (msg {sent.message_id})")
+    print(f"[deliver] caption set nahi ho paaya (msg {sent.message_id})")
     _delivery_status(chat_id, sent.message_id, "fail")
 
 

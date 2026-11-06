@@ -241,13 +241,9 @@ def _waiting_bar(pos):
 
 
 def _waiting_text(elapsed, pos=0):
-    """Fallback screen — target bot ka asli order:
-    [1/1] -> Downloading -> Checking codecs -> Uploading.
+    """Fallback screen (target bot ka order): Downloading -> Checking codecs -> Uploading.
     Jaise hi target bot apna progress bhejta hai, wahi text isse replace kar deta hai.
     """
-    if elapsed < 15:
-        return "🔍 [1/1]"
-
     if elapsed < 45:
         return (
             "📥 Downloading video\n\n"

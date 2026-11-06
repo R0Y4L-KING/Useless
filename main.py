@@ -47,7 +47,10 @@ PORT = int(os.environ.get('PORT', '8080'))
 # Delivered video kitni der baad delete ho (seconds). 0 = kabhi delete nahi.
 AUTO_DELETE_SECONDS = int(os.environ.get('AUTO_DELETE_SECONDS', '3600'))
 # Ek download job max itne second chal sakti hai (uske baad timeout)
-JOB_TIMEOUT_SEC = int(os.environ.get('JOB_TIMEOUT_SEC', '300'))
+JOB_TIMEOUT_SEC = int(os.environ.get('JOB_TIMEOUT_SEC', '2700'))
+# Jab tak target bot progress bhej raha hai, tab tak wait karo.
+# Sirf itne second tak koi activity na ho to timeout.
+INACTIVITY_TIMEOUT_SEC = int(os.environ.get('INACTIVITY_TIMEOUT_SEC', '420'))
 
 # Har delivery ke baad owner ko 1 line status (thumbnail laga ya nahi)
 DELIVERY_ALERTS = os.environ.get('DELIVERY_ALERTS', '0') == '1'
@@ -241,24 +244,8 @@ def _waiting_bar(pos):
 
 
 def _waiting_text(elapsed, pos=0):
-    """Fallback screen (target bot ka order): Downloading -> Checking codecs -> Uploading.
-    Jaise hi target bot apna progress bhejta hai, wahi text isse replace kar deta hai.
-    """
-    if elapsed < 45:
-        return (
-            "📥 Downloading video\n\n"
-            f"{_waiting_bar(pos)}\n\n"
-            f"⏱ Time Elapsed: {elapsed}s"
-        )
-
-    if elapsed < 75:
-        return "⚙️ Checking video codecs & optimizing..."
-
-    return (
-        "📥 ⚡ High-Speed Uploading...\n\n"
-        f"{_waiting_bar(pos)}\n\n"
-        f"⏱ Time Elapsed: {elapsed}s"
-    )
+    """Shuru me bas ek line. Uske baad target bot jo bhejta hai wahi dikhta hai."""
+    return "📥 Downloading video"
 
 
 _spinners = {}
@@ -280,12 +267,18 @@ def start_spinner(chat_id, message_id, interval=2.0):
 
     def animate():
         pos = 0
+        last_sent = None
         while not stop_event.is_set():
             secs = int(time.time() - started)
             pos += 1
+            text = _waiting_text(secs, pos)
+            if text == last_sent:
+                stop_event.wait(interval)
+                continue
+            last_sent = text
             try:
                 bot.edit_message_text(
-                    _waiting_text(secs, pos),
+                    text,
                     chat_id=chat_id,
                     message_id=message_id,
                     parse_mode="Markdown",
@@ -462,9 +455,21 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
     quality_clicked = False
     last_progress_text = ""
     
-    # 🧠 SUPER LOOP (120 * 2 sec = 240 seconds = 4 minutes)
-    for _ in range(160): 
-        await asyncio.sleep(1.5)  # Fast check (total ~4 min)
+    # Target bot jitni der kaam kare, hum utni der sunte rahenge.
+    # Timeout sirf tab jab wo INACTIVITY_TIMEOUT_SEC tak kuch na bheje.
+    started_at = time.time()
+    last_activity = time.time()
+    seen_texts = {}
+
+    while True:
+        await asyncio.sleep(1.5)
+        now = time.time()
+        if now - started_at > JOB_TIMEOUT_SEC:
+            print("[telethon] max job time cross ho gaya")
+            break
+        if now - last_activity > INACTIVITY_TIMEOUT_SEC:
+            print(f"[telethon] {INACTIVITY_TIMEOUT_SEC}s se koi activity nahi")
+            break
         # min_id = apne bheje link ka id (hamesha). Isse target bot ki wahi
         # message jo wo baar-baar EDIT karta hai (progress) har baar padhi jaati hai.
         try:
@@ -480,6 +485,9 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
         for msg in history:
             if msg.id > last_seen_id:
                 last_seen_id = msg.id
+            if msg.text and seen_texts.get(msg.id) != msg.text:
+                seen_texts[msg.id] = msg.text
+                last_activity = time.time()
             if msg.out: 
                 continue 
             

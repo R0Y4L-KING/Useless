@@ -2098,6 +2098,27 @@ def register_user(message):
         print(f"[users] register fail: {e}")
 
 
+@bot.message_handler(commands=['cover'])
+def cmd_cover(message):
+    if message.from_user.id != OWNER_ID:
+        return
+    parts = (message.text or "").split()
+    mode = parts[1].lower() if len(parts) > 1 else ""
+    if mode not in ("auto", "always", "never"):
+        cur = (store.get_kv("cover_mode") or {}).get("mode", "auto")
+        bot.send_message(
+            message.chat.id,
+            f"Cover mode abhi: {cur}\n\n"
+            "Badalne ke liye:\n"
+            "/cover always — har video ka thumbnail apna laga do\n"
+            "/cover auto — sirf jab target bot ki branding ho\n"
+            "/cover never — thumbnail kabhi na badlo",
+        )
+        return
+    store.set_kv("cover_mode", {"mode": mode})
+    bot.send_message(message.chat.id, f"✅ Cover mode: {mode}")
+
+
 @bot.message_handler(commands=['health'])
 def cmd_health(message):
     if message.from_user.id != OWNER_ID:
@@ -2485,13 +2506,20 @@ def _thumb_dhash(data):
     return f"{bits:016x}"
 
 
+def _hamming(a, b):
+    try:
+        return bin(int(a, 16) ^ int(b, 16)).count("1")
+    except Exception:
+        return 99
+
+
 def _is_branded_thumb(sent):
     """True agar video ka thumbnail target bot ki branding hai.
 
     Ek hi image (branding) alag-alag videos pe repeat hoti hai, jabki asli video
-    ka thumbnail us video ke saath hi rehta hai. Isliye hash ke saath ye bhi
-    yaad rakhte hain ki wo hash kitni ALAG videos pe dikha — same video dobara
-    download hone se count nahi badhta.
+    ka thumbnail us video ke saath hi rehta hai. Telegram har baar thumbnail ko
+    dobara encode karta hai, isliye exact hash match nahi hota — Hamming distance
+    se milate hain, aur sirf ALAG videos ginte hain.
     """
     vid = getattr(sent, "video", None)
     if not vid:
@@ -2508,7 +2536,6 @@ def _is_branded_thumb(sent):
         print(f"[thumb] hash fail: {e}")
         return False
 
-    # video ki unique id — same video dobara aaye to count nahi badhna chahiye
     vid_uid = (
         str(getattr(vid, "file_unique_id", "") or "")
         or str(getattr(vid, "file_id", ""))[:32]
@@ -2519,16 +2546,30 @@ def _is_branded_thumb(sent):
     except Exception:
         seen = {}
 
-    vids = list(seen.get(h, []) or [])
-    if vid_uid and vid_uid not in vids and len(vids) < 10:
-        vids.append(vid_uid)
-    seen[h] = vids
+    entries = seen.get("items")
+    if not isinstance(entries, list):
+        # purane format (dict) se migrate karo
+        entries = [{"h": k, "vids": list(v or [])} for k, v in seen.items() if isinstance(v, list)]
+
+    match = None
+    for e in entries:
+        if _hamming(e.get("h", ""), h) <= 4:
+            match = e
+            break
+    if match is None:
+        match = {"h": h, "vids": []}
+        entries.append(match)
+
+    if vid_uid and vid_uid not in match["vids"] and len(match["vids"]) < 10:
+        match["vids"].append(vid_uid)
+
+    seen = {"items": entries[-60:]}
     try:
         store.set_kv("thumb_hash_vids", seen)
     except Exception as e:
         print(f"[thumb] save fail: {e}")
 
-    distinct = len(vids)
+    distinct = len(match["vids"])
     branded = distinct >= COVER_HASH_MIN
     print(f"[thumb] hash={h} videos={distinct} branded={branded}")
     return branded
@@ -2566,9 +2607,18 @@ def _finalize_delivery(chat_id, sent, markup, tries=5):
     caption = build_video_caption(sent)
     delays = [0, 4, 8, 12, 18]
 
-    # Cover sirf tab badlo jab thumbnail target bot ki branding ho.
-    # Original thumbnail wali videos ka thumbnail waise hi rehne do.
-    branded = _is_branded_thumb(sent) if (REPLACE_COVER and COVER_URL) else False
+    # Cover mode: auto (branding detect ho to) / always / never
+    mode = "auto"
+    try:
+        mode = (store.get_kv("cover_mode") or {}).get("mode", "auto")
+    except Exception:
+        pass
+    if mode == "always":
+        branded = True
+    elif mode == "never":
+        branded = False
+    else:
+        branded = _is_branded_thumb(sent) if (REPLACE_COVER and COVER_URL) else False
     if not branded:
         print("[deliver] original thumbnail — cover nahi badlega, sirf caption")
 

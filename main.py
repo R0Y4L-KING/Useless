@@ -522,7 +522,7 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
                     _edit(
                         user_chat_id,
                         call_msg_id,
-                        f"{progress_text}\n\n💎 **Premium lo — no waiting, instant downloads!**",
+                        progress_text,
                         reply_markup=plan_markup,
                     )
                     last_progress_text = progress_text

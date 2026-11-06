@@ -229,13 +229,41 @@ BAR_FRAMES = [
 # Loading screen: koi fake "Downloading/Uploading" ya fake % nahi — sirf
 # indeterminate bar + elapsed time. Jaise hi target bot apna asli progress
 # bhejta hai (Downloading 33% / Uploading 78%), wahi jaisa hai waisa dikhta hai.
+BAR_LEN = 22
+
+
+def _waiting_bar(pos):
+    """Indeterminate bar — block aage-peeche chalta hai."""
+    bar = ["▒"] * BAR_LEN
+    for i in range(4):
+        bar[(pos + i) % BAR_LEN] = "█"
+    return "".join(bar)
+
+
 def _waiting_text(elapsed, pos=0):
-    """Shuru me bilkul target bot jaisa hi: 🔍 [1/1].
-    Uske baad target bot jo bhejta hai (codecs / downloading / uploading)
-    wahi mirror ho jaata hai."""
+    """Fallback screen — target bot ka asli order:
+    [1/1] -> Downloading -> Checking codecs -> Uploading.
+    Jaise hi target bot apna progress bhejta hai, wahi text isse replace kar deta hai.
+    """
     if elapsed < 15:
         return "🔍 [1/1]"
-    return f"🔍 [1/1]\n\n⏳ {elapsed}s — server ka response aane wala hai..."
+
+    if elapsed < 45:
+        return (
+            "📥 Downloading video\n\n"
+            f"{_waiting_bar(pos)}\n\n"
+            f"⏱ Time Elapsed: {elapsed}s"
+        )
+
+    if elapsed < 75:
+        return "⚙️ Checking video codecs & optimizing..."
+
+    return (
+        "📥 ⚡ High-Speed Uploading...\n\n"
+        f"{_waiting_bar(pos)}\n\n"
+        f"⏱ Time Elapsed: {elapsed}s"
+    )
+
 
 _spinners = {}
 _spinners_lock = threading.Lock()

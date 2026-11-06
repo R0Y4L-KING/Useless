@@ -229,24 +229,13 @@ BAR_FRAMES = [
 # Loading screen: koi fake "Downloading/Uploading" ya fake % nahi — sirf
 # indeterminate bar + elapsed time. Jaise hi target bot apna asli progress
 # bhejta hai (Downloading 33% / Uploading 78%), wahi jaisa hai waisa dikhta hai.
-BAR_LEN = 22
-
-
-def _waiting_bar(pos):
-    """pos 0..BAR_LEN — ek block aage-peeche chalta hai (indeterminate)."""
-    bar = ["░"] * BAR_LEN
-    for i in range(4):
-        idx = (pos + i) % BAR_LEN
-        bar[idx] = "█"
-    return "".join(bar)
-
-
 def _waiting_text(elapsed, pos=0):
-    return (
-        "⏳ Video process ho rahi hai...\n\n"
-        f"{_waiting_bar(pos)}\n\n"
-        f"⏱ Time Elapsed: {elapsed}s"
-    )
+    """Shuru me bilkul target bot jaisa hi: 🔍 [1/1].
+    Uske baad target bot jo bhejta hai (codecs / downloading / uploading)
+    wahi mirror ho jaata hai."""
+    if elapsed < 15:
+        return "🔍 [1/1]"
+    return f"🔍 [1/1]\n\n⏳ {elapsed}s — server ka response aane wala hai..."
 
 _spinners = {}
 _spinners_lock = threading.Lock()
@@ -452,10 +441,11 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
     # 🧠 SUPER LOOP (120 * 2 sec = 240 seconds = 4 minutes)
     for _ in range(160): 
         await asyncio.sleep(1.5)  # Fast check (total ~4 min)
-        # sirf apne link ke baad aaye messages (min_id) — purane/doosre user ke nahi
+        # min_id = apne bheje link ka id (hamesha). Isse target bot ki wahi
+        # message jo wo baar-baar EDIT karta hai (progress) har baar padhi jaati hai.
         try:
             history = await client.get_messages(
-                target_entity, limit=10, min_id=last_seen_id
+                target_entity, limit=12, min_id=sent_link.id
             )
         except Exception as e:
             print(f"[telethon] get_messages fail: {e}")

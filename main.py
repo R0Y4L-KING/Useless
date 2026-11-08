@@ -1048,6 +1048,8 @@ class Store:
 print("[boot] store connect kar raha hai...")
 store = Store(MONGODB_URI, DB_PATH)
 print("[boot] store ready")
+if not SHORTENER_API_KEY:
+    print("[boot] ⚠️ SHORTENER_API_KEY set nahi hai — verification links nahi banenge!")
 
 
 def _deleted_notice_text():
@@ -1297,11 +1299,12 @@ def create_verify_link(user_id):
         gateway_url = f"{PUBLIC_URL}/r/{token}"
         if VERIFY_LINK_MODE == "page_first":
             ad_link = make_short_link(deep_link)
-            if not ad_link:
-                # Shortener down ho to user ko block mat karo — is baar bina ad
-                # ke verify hone do, warna poora bot ruk jaayega.
-                ad_link = deep_link
-                print("[ads] ad link fail — is baar bina ad ke verify ho raha hai")
+            # Ad link nahi bana (ya wo seedha t.me link hai) to verification
+            # BLOCK karo — warna button dabate hi verify ho jaayega (bypass).
+            if not ad_link or "t.me/" in ad_link:
+                store.delete_token(token)
+                print("[ads] ad link nahi bana — verification blocked (fail closed)")
+                return None, token
             store.update_token(token, ad_link=ad_link)
         print(f"[ads] gateway link for {user_id}: {gateway_url} ({VERIFY_LINK_MODE})")
         return gateway_url, token

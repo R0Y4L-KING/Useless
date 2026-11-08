@@ -74,7 +74,7 @@ FREE_DAILY_LIMIT = int(os.environ.get('FREE_DAILY_LIMIT', '0'))
 
 # ---- Ads verification (shortener) ----
 # API key Render ke env me daalo: SHORTENER_API_KEY
-SHORTENER_ENDPOINT = os.environ.get('SHORTENER_ENDPOINT', 'https://vipshort.in/api')
+SHORTENER_ENDPOINT = os.environ.get('SHORTENER_ENDPOINT', 'https://shortxlinks.com/api')
 SHORTENER_API_KEY = os.environ.get('SHORTENER_API_KEY', '')
 # Anti-bypass gateway: apna public URL (Render URL). Set hone par bot apna
 # /r/<token> link deta hai, shortener link user ko kabhi nahi dikhta.
@@ -1237,7 +1237,7 @@ def downloads_left_text(user_id):
 
 # ---------- Ads verification (shortlink) ----------
 def make_short_link(dest_url, alias=None):
-    """Shortener se chhota link banao. Fail ho to None."""
+    """Shortener se chhota link banao (Shortxlinks). Fail ho to None."""
     if not SHORTENER_API_KEY:
         print("[ads] SHORTENER_API_KEY set nahi hai — seedha link use hoga")
         return None
@@ -1246,22 +1246,25 @@ def make_short_link(dest_url, alias=None):
     if alias:
         params["alias"] = alias
 
-    try:
-        r = requests.get(SHORTENER_ENDPOINT, params=params, timeout=20)
-        r.raise_for_status()
-        text = (r.text or "").strip()
-        if text.startswith("http"):
-            return text
+    for attempt in range(1, 4):
         try:
-            data = r.json()
-        except Exception:
-            data = {}
-        for key in ("shortenedUrl", "shorturl", "short_url", "url", "link"):
-            if data.get(key):
-                return data[key]
-        print(f"[ads] shortener response samajh nahi aaya: {text[:200]}")
-    except Exception as e:
-        print(f"[ads] shortener fail: {e}")
+            r = requests.get(SHORTENER_ENDPOINT, params=params, timeout=20)
+            r.raise_for_status()
+            text = (r.text or "").strip().strip('"').strip("'")
+            if text.startswith("http"):
+                return text
+            try:
+                data = r.json()
+            except Exception:
+                data = {}
+            for key in ("shortenedUrl", "shortened_url", "shorturl", "short_url", "url", "link"):
+                val = data.get(key)
+                if isinstance(val, str) and val.startswith("http"):
+                    return val
+            print(f"[ads] shortener response samajh nahi aaya (try {attempt}): {text[:200]}")
+        except Exception as e:
+            print(f"[ads] shortener fail (try {attempt}): {e}")
+        time.sleep(2)
     return None
 
 
@@ -1295,9 +1298,10 @@ def create_verify_link(user_id):
         if VERIFY_LINK_MODE == "page_first":
             ad_link = make_short_link(deep_link)
             if not ad_link:
-                store.delete_token(token)
-                print("[ads] ad link fail — verification blocked (fail closed)")
-                return None, token
+                # Shortener down ho to user ko block mat karo — is baar bina ad
+                # ke verify hone do, warna poora bot ruk jaayega.
+                ad_link = deep_link
+                print("[ads] ad link fail — is baar bina ad ke verify ho raha hai")
             store.update_token(token, ad_link=ad_link)
         print(f"[ads] gateway link for {user_id}: {gateway_url} ({VERIFY_LINK_MODE})")
         return gateway_url, token

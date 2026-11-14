@@ -2152,9 +2152,8 @@ def is_channel_member(user_id, force=False):
     return ok
 
 
-def _join_caption(name):
+def _join_caption(name=""):
     return (
-        f"HELLO {name}\n\n"
         "<blockquote>JOIN OUR CHANNEL AND THEN CLICK ON "
         "TRY AGAIN TO GET YOUR VIDEO.</blockquote>"
     )
@@ -2425,9 +2424,8 @@ def cmd_stats(message):
     bot.send_message(message.chat.id, _stats_text(), parse_mode="Markdown")
 
 
-def _welcome_caption(name):
+def _welcome_caption(name=""):
     return (
-        f"HELLO {name}\n\n"
         "<blockquote>💫 <b>Welcome To Faphouse King Bot</b> 💫</blockquote>\n\n"
         "<blockquote expandable>📥 <b>How to use</b>\n"
         "1. Open <b>faphouse2.com</b>\n"

@@ -69,6 +69,13 @@ SUPPORT_CHANNEL = os.environ.get('SUPPORT_CHANNEL', '@ModAppsKing')
 FORCE_JOIN = os.environ.get('FORCE_JOIN', '1') == '1'
 FORCE_JOIN_CHANNEL = os.environ.get('FORCE_JOIN_CHANNEL', '@modappsking')
 FORCE_JOIN_URL = os.environ.get('FORCE_JOIN_URL', 'https://t.me/modappsking')
+FORCE_JOIN_TITLE = os.environ.get('FORCE_JOIN_TITLE', 'MOD APPS KING')
+
+# Welcome / join screen ki photo
+WELCOME_IMG_URL = os.environ.get(
+    'WELCOME_IMG_URL',
+    'https://raw.githubusercontent.com/R0Y4L-KING/Useless/main/welcome.jpg',
+)
 
 # Auto-delete ke baad bhejne wali 'deleted' image
 DELETED_PIC_URL = os.environ.get(
@@ -2145,43 +2152,52 @@ def is_channel_member(user_id, force=False):
     return ok
 
 
-def send_join_prompt(chat_id):
+def _join_caption(name):
+    return (
+        f"HELLO {name}\n\n"
+        "<blockquote>JOIN OUR CHANNEL AND THEN CLICK ON "
+        "TRY AGAIN TO GET YOUR VIDEO.</blockquote>"
+    )
+
+
+def send_join_prompt(chat_id, name=""):
     markup = types.InlineKeyboardMarkup(row_width=1)
-    markup.add(types.InlineKeyboardButton("📢 Join Channel", url=FORCE_JOIN_URL))
-    markup.add(types.InlineKeyboardButton("✅ Joined — Check Again", callback_data="checkjoin"))
+    markup.add(types.InlineKeyboardButton(
+        f"📢 {FORCE_JOIN_TITLE} ↗", url=FORCE_JOIN_URL))
+    markup.add(types.InlineKeyboardButton("♻️ TRY AGAIN", callback_data="checkjoin"))
+
+    caption = _join_caption(name or "boss")
     try:
-        bot.send_message(
-            chat_id,
-            "🔒 <b>Pehle channel join karo</b>\n\n"
-            "Bot use karne ke liye neeche wala channel join karo, "
-            "phir <b>Joined — Check Again</b> dabao.",
-            reply_markup=markup,
-            parse_mode="HTML",
-        )
+        if WELCOME_IMG_URL:
+            bot.send_photo(chat_id, WELCOME_IMG_URL, caption=caption,
+                           reply_markup=markup, parse_mode="HTML")
+            return
     except Exception as e:
-        print(f"[join] prompt fail: {e}")
+        print(f"[join] photo fail: {e}")
+    bot.send_message(chat_id, caption, reply_markup=markup, parse_mode="HTML")
 
 
-def force_join_gate(chat_id, user_id):
+def force_join_gate(chat_id, user_id, name=""):
     """True = aage badhne do, False = join prompt bhej diya."""
     if is_channel_member(user_id):
         return True
-    send_join_prompt(chat_id)
+    send_join_prompt(chat_id, name)
     return False
 
 
 @bot.callback_query_handler(func=lambda call: call.data == "checkjoin")
 def cb_checkjoin(call):
-    bot.answer_callback_query(call.id)
+    name = getattr(call.from_user, "first_name", "") or "boss"
     if is_channel_member(call.from_user.id, force=True):
-        bot.send_message(
-            call.message.chat.id,
-            "✅ Verified! Ab bot use kar sakte ho.\n\n👇 Apna Faphouse link bhejo.",
-            reply_markup=get_main_keyboard(),
-        )
+        bot.answer_callback_query(call.id, "✅ Verified!")
+        try:
+            bot.delete_message(call.message.chat.id, call.message.message_id)
+        except Exception:
+            pass
+        send_welcome(call.message.chat.id, name)
     else:
         bot.answer_callback_query(
-            call.id, "Abhi channel join nahi kiya hai. Join karke phir check karo.",
+            call.id, "Abhi channel join nahi kiya hai. Join karke phir TRY AGAIN dabao.",
             show_alert=True,
         )
 
@@ -2409,23 +2425,9 @@ def cmd_stats(message):
     bot.send_message(message.chat.id, _stats_text(), parse_mode="Markdown")
 
 
-@bot.message_handler(commands=['start'])
-def start_command(message):
-    register_user(message)
-
-    if not force_join_gate(message.chat.id, message.from_user.id):
-        return
-
-
-    parts = (message.text or "").split(maxsplit=1)
-    payload = parts[1].strip() if len(parts) > 1 else ""
-    if payload.startswith("verify_"):
-        handle_verify_payload(message, payload[len("verify_"):])
-        return
-
-    asyncio.run_coroutine_threadsafe(_send_start_to_target(), loop)
-
-    welcome_text = (
+def _welcome_caption(name):
+    return (
+        f"HELLO {name}\n\n"
         "<blockquote>💫 <b>Welcome To Faphouse King Bot</b> 💫</blockquote>\n\n"
         "<blockquote expandable>📥 <b>How to use</b>\n"
         "1. Open <b>faphouse2.com</b>\n"
@@ -2440,13 +2442,56 @@ def start_command(message):
         "💎 /premium — no ads, unlimited"
     )
 
-    bot.send_message(
-        message.chat.id,
-        welcome_text,
-        reply_markup=get_main_keyboard(),
-        parse_mode="HTML",
-    )
-    bot.send_message(message.chat.id, "👇 Apna Faphouse link bhejo boss!")
+
+def send_welcome(chat_id, name=""):
+    """Banner photo + caption + keyboard."""
+    caption = _welcome_caption(name or "boss")
+    try:
+        if WELCOME_IMG_URL:
+            bot.send_photo(
+                chat_id, WELCOME_IMG_URL,
+                caption=caption,
+                reply_markup=get_main_keyboard(),
+                parse_mode="HTML",
+            )
+            return
+    except Exception as e:
+        print(f"[welcome] photo fail: {e}")
+    bot.send_message(chat_id, caption, reply_markup=get_main_keyboard(), parse_mode="HTML")
+
+
+@bot.message_handler(commands=['start'])
+def start_command(message):
+    register_user(message)
+    name = getattr(message.from_user, "first_name", "") or "boss"
+
+    # video jaisa: pehle "Checking Subscription..."
+    checking_id = None
+    try:
+        checking = bot.send_message(message.chat.id, "⏳ <i>Checking Subscription...</i>",
+                                    parse_mode="HTML")
+        checking_id = getattr(checking, "message_id", None)
+    except Exception as e:
+        print(f"[join] checking msg fail: {e}")
+
+    if not force_join_gate(message.chat.id, message.from_user.id, name):
+        return
+
+    if checking_id:
+        try:
+            bot.delete_message(message.chat.id, checking_id)
+        except Exception:
+            pass
+
+    parts = (message.text or "").split(maxsplit=1)
+    payload = parts[1].strip() if len(parts) > 1 else ""
+    if payload.startswith("verify_"):
+        handle_verify_payload(message, payload[len("verify_"):])
+        return
+
+    asyncio.run_coroutine_threadsafe(_send_start_to_target(), loop)
+    send_welcome(message.chat.id, name)
+
 
 @bot.message_handler(func=lambda msg: msg.text == "📥 Download")
 def handle_download_btn(message):

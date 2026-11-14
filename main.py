@@ -61,6 +61,8 @@ DELIVERY_PREVIEW = os.environ.get('DELIVERY_PREVIEW', '0') == '1'
 UPI_ID = os.environ.get('UPI_ID', 'modappsking@nyes')
 UPI_NAME = os.environ.get('UPI_NAME', 'ModAppsKing')
 SUPPORT_LINK = os.environ.get('SUPPORT_LINK', 'https://t.me/ModAppsKing')
+# Payment reject hone par user ko yahi link dikhta hai
+HELP_LINK = os.environ.get('HELP_LINK', 'https://t.me/R0Y4L_KING')
 SUPPORT_CHANNEL = os.environ.get('SUPPORT_CHANNEL', '@ModAppsKing')
 
 # Auto-delete ke baad bhejne wali 'deleted' image
@@ -2029,7 +2031,7 @@ def cb_verify(call):
             bot.send_message(
                 user_id,
                 "❌ Payment verify nahi hua.\n\n"
-                f"Agar paisa cut gaya hai to support pe message karo: {SUPPORT_LINK}\n"
+                f"Agar paisa cut gaya hai to support pe message karo: {HELP_LINK}\n"
                 f"Order ID: {order_id}",
             )
         except Exception as e:

@@ -65,6 +65,11 @@ SUPPORT_LINK = os.environ.get('SUPPORT_LINK', 'https://t.me/ModAppsKing')
 HELP_LINK = os.environ.get('HELP_LINK', 'https://t.me/R0Y4L_KING')
 SUPPORT_CHANNEL = os.environ.get('SUPPORT_CHANNEL', '@ModAppsKing')
 
+# ---- Force join (bot ko channel me admin banana zaroori hai) ----
+FORCE_JOIN = os.environ.get('FORCE_JOIN', '1') == '1'
+FORCE_JOIN_CHANNEL = os.environ.get('FORCE_JOIN_CHANNEL', '@modappsking')
+FORCE_JOIN_URL = os.environ.get('FORCE_JOIN_URL', 'https://t.me/modappsking')
+
 # Auto-delete ke baad bhejne wali 'deleted' image
 DELETED_PIC_URL = os.environ.get(
     'DELETED_PIC_URL',
@@ -1393,6 +1398,8 @@ def handle_verify_payload(message, token):
 @bot.message_handler(commands=['verify'])
 def verify_command(message):
     user_id = message.from_user.id
+    if not force_join_gate(message.chat.id, user_id):
+        return
     if is_premium(user_id):
         bot.send_message(
             message.chat.id, "💎 Aap Premium user ho — unlimited downloads, koi ads nahi!"
@@ -1648,11 +1655,15 @@ def send_plans(chat_id):
 
 @bot.message_handler(commands=['premium', 'plans', 'buy'])
 def premium_command(message):
+    if not force_join_gate(message.chat.id, message.from_user.id):
+        return
     send_plans(message.chat.id)
 
 
 @bot.message_handler(func=lambda msg: msg.text == "💎 Premium")
 def premium_button(message):
+    if not force_join_gate(message.chat.id, message.from_user.id):
+        return
     send_plans(message.chat.id)
 
 
@@ -1666,6 +1677,8 @@ def cancel_command(message):
 @bot.callback_query_handler(func=lambda call: call.data == "premium_menu")
 def cb_premium_menu(call):
     bot.answer_callback_query(call.id)
+    if not force_join_gate(call.message.chat.id, call.from_user.id):
+        return
     send_plans(call.message.chat.id)
 
 
@@ -2103,6 +2116,76 @@ def cmd_revoke(message):
 
 
 # ================= BOT UI =================
+# ================= FORCE JOIN =================
+_member_cache = {}
+
+
+def is_channel_member(user_id, force=False):
+    """Channel member hai ya nahi (10 min cache)."""
+    if not FORCE_JOIN:
+        return True
+    now = time.time()
+    if not force:
+        cached = _member_cache.get(user_id)
+        if cached and now - cached[1] < 600:
+            return cached[0]
+
+    try:
+        member = bot.get_chat_member(FORCE_JOIN_CHANNEL, user_id)
+        status = str(getattr(member, "status", "")).lower()
+        ok = any(k in status for k in ("member", "administrator", "creator", "owner"))
+        if "left" in status or "kicked" in status or "restricted" in status:
+            ok = False
+    except Exception as e:
+        # bot admin nahi hai / channel galat hai to bot ko block na karo
+        print(f"[join] check fail ({e}) — is user ko allow kar rahe hain")
+        ok = True
+
+    _member_cache[user_id] = (ok, now)
+    return ok
+
+
+def send_join_prompt(chat_id):
+    markup = types.InlineKeyboardMarkup(row_width=1)
+    markup.add(types.InlineKeyboardButton("📢 Join Channel", url=FORCE_JOIN_URL))
+    markup.add(types.InlineKeyboardButton("✅ Joined — Check Again", callback_data="checkjoin"))
+    try:
+        bot.send_message(
+            chat_id,
+            "🔒 <b>Pehle channel join karo</b>\n\n"
+            "Bot use karne ke liye neeche wala channel join karo, "
+            "phir <b>Joined — Check Again</b> dabao.",
+            reply_markup=markup,
+            parse_mode="HTML",
+        )
+    except Exception as e:
+        print(f"[join] prompt fail: {e}")
+
+
+def force_join_gate(chat_id, user_id):
+    """True = aage badhne do, False = join prompt bhej diya."""
+    if is_channel_member(user_id):
+        return True
+    send_join_prompt(chat_id)
+    return False
+
+
+@bot.callback_query_handler(func=lambda call: call.data == "checkjoin")
+def cb_checkjoin(call):
+    bot.answer_callback_query(call.id)
+    if is_channel_member(call.from_user.id, force=True):
+        bot.send_message(
+            call.message.chat.id,
+            "✅ Verified! Ab bot use kar sakte ho.\n\n👇 Apna Faphouse link bhejo.",
+            reply_markup=get_main_keyboard(),
+        )
+    else:
+        bot.answer_callback_query(
+            call.id, "Abhi channel join nahi kiya hai. Join karke phir check karo.",
+            show_alert=True,
+        )
+
+
 def get_main_keyboard():
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     markup.add(
@@ -2330,6 +2413,9 @@ def cmd_stats(message):
 def start_command(message):
     register_user(message)
 
+    if not force_join_gate(message.chat.id, message.from_user.id):
+        return
+
 
     parts = (message.text or "").split(maxsplit=1)
     payload = parts[1].strip() if len(parts) > 1 else ""
@@ -2441,6 +2527,8 @@ def send_verify_gate(chat_id, reason="verify"):
 
 def begin_download(chat_id, url=None):
     """Link milte hi seedha loading screen + download shuru."""
+    if not force_join_gate(chat_id, chat_id):
+        return
     if url:
         user_requests[chat_id] = url
     url = user_requests.get(chat_id)

@@ -58,7 +58,7 @@ DELIVERY_ALERTS = os.environ.get('DELIVERY_ALERTS', '0') == '1'
 DELIVERY_PREVIEW = os.environ.get('DELIVERY_PREVIEW', '0') == '1'
 
 # ---- Premium / payment (UPI only, koi crypto nahi) ----
-UPI_ID = os.environ.get('UPI_ID', '20213904@axl')
+UPI_ID = os.environ.get('UPI_ID', 'modappsking@nyes')
 UPI_NAME = os.environ.get('UPI_NAME', 'ModAppsKing')
 SUPPORT_LINK = os.environ.get('SUPPORT_LINK', 'https://t.me/ModAppsKing')
 SUPPORT_CHANNEL = os.environ.get('SUPPORT_CHANNEL', '@ModAppsKing')
@@ -91,17 +91,6 @@ MONGODB_URI = os.environ.get('MONGODB_URI', '')
 DB_PATH = os.environ.get('DB_PATH', 'premium_db.json')
 
 # UPI payment page (hosted QR page)
-PAYMENT_PAGE_URL = os.environ.get(
-    'PAYMENT_PAGE_URL', 'https://r0y4l-king.github.io/upi-pay/'
-)
-
-
-def payment_page_url(amount=None):
-    """UPI page ka link — amount diya to query me bhi jaayega (page auto-fill karta hai)."""
-    if not amount:
-        return PAYMENT_PAGE_URL
-    sep = "&" if "?" in PAYMENT_PAGE_URL else "?"
-    return f"{PAYMENT_PAGE_URL}{sep}pa={quote(UPI_ID)}&am={int(amount)}&pn={quote(UPI_NAME)}"
 PREMIUM_BANNER_URL = os.environ.get(
     'PREMIUM_BANNER_URL',
     'https://raw.githubusercontent.com/R0Y4L-KING/Useless/main/premium_banner.jpg',
@@ -1795,14 +1784,13 @@ def start_payment(chat_id, user_id, key):
         f"🧾 Order ID: {order_id}\n"
         f"🏦 UPI ID: {UPI_ID}\n\n"
         "**Payment Instructions:**\n"
-        "1️⃣ 'Pay Now (UPI)' dabao ya QR scan karo\n"
+        "1️⃣ Neeche wala QR kisi bhi UPI app se scan karo\n"
         f"2️⃣ Exactly ₹{plan['price']} pay karo\n"
         "3️⃣ Payment ke baad 'Send Payment Proof' dabao\n\n"
+        f"⚠️ Sirf exact ₹{plan['price']} pay karo — kam amount par order verify nahi hoga.\n"
         "⚠️ Proof verify hone ke baad premium activate ho jaayega."
     )
     markup = types.InlineKeyboardMarkup(row_width=1)
-    markup.add(types.InlineKeyboardButton(
-        "🌐 Pay Now (UPI)", url=payment_page_url(plan["price"])))
     markup.add(types.InlineKeyboardButton(
         "📲 Scan to Pay", callback_data=f"scanqr:{order_id}"))
     markup.add(types.InlineKeyboardButton(
@@ -1928,8 +1916,9 @@ def cb_paid(call):
     bot.answer_callback_query(call.id)
     bot.send_message(
         call.message.chat.id,
-        "🧾 Apna **UTR / Transaction ID** (12 digit) bhejo, ya payment ka screenshot bhejo.\n\n"
-        f"Order ID: {order_id}",
+        "🧾 APNA **UTR / TRANSACTION ID** (12 DIGIT) BHEJO,\n"
+        "YA PAYMENT KA SCREENSHOT BHEJO.\n\n"
+        f"ORDER ID: {order_id}",
         parse_mode="Markdown",
     )
 

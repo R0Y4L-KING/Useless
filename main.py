@@ -406,6 +406,12 @@ TARGET_FAIL_PATTERNS = [
     "video not found",
     "link is invalid",
     "please report us",
+    "no matching formats",
+    "payload size restriction",
+    "2 gb payload",
+    "no formats found",
+    "file is too large",
+    "too large",
 ]
 
 
@@ -498,13 +504,11 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
                 if _hit:
                     print(f"[telethon] Target bot fail ho gaya: '{_hit}'")
                     refund_download(user_chat_id, refund_kind)
-                    if "premium and ultra" in _low or "fanclub" in _low:
-                        _msg = (
-                            "We Only Support Premium And Ultra Videos.❣️\n"
-                            "It is Likely That This is a Fanclub Link Which is Not Supported. 🐾"
-                        )
-                    else:
-                        _msg = "❌ Download Failed. Kripya doosra link try karein."
+                    # target bot ka hi message dikhao — bas uska [1/1] marker hatao
+                    _clean = re.sub(r"\s*\[\s*\d+\s*/\s*\d+\s*\]\s*", " ", msg.text)
+                    _clean = _clean.replace("🔍", "")
+                    _clean = re.sub(r"\s{2,}", " ", _clean).strip()
+                    _msg = _clean if len(_clean) > 10 else "❌ Download Failed. Kripya doosra link try karein."
                     _edit(user_chat_id, call_msg_id, _msg)
                     return False
 

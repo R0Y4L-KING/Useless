@@ -22,7 +22,7 @@ from urllib.parse import quote
 import requests
 import telebot
 from telebot import types
-from telethon import TelegramClient, events
+from telethon import TelegramClient
 from telethon.sessions import StringSession
 
 # ===================== CONFIG (TESTING VALUES) =====================
@@ -393,7 +393,7 @@ async def _send_start_to_target():
         await client.send_message(TARGET_BOT, "/start")
         print("[telethon] Target bot ko /start bhej diya gaya hai! ✅")
     except Exception as e:
-        pass
+        print(f"[telethon] /start send fail: {e}")
 
 # Target bot ke error messages — inme se koi bhi mile to download fail maan lo
 TARGET_FAIL_PATTERNS = [
@@ -667,6 +667,7 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
 # target bot ka state mix ho jaata tha aur video galat user ko chali jaati thi.
 # Isliye ab har download queue me jaati hai aur worker ek-ek karke chalata hai.
 job_queue = None
+USERBOT_ID = 0
 worker_busy = False        # worker abhi ek job chala raha hai?
 active_users = set()       # jinke download chal rahe/queue me hain
 MAX_QUEUE = int(os.environ.get('MAX_QUEUE', '15'))
@@ -674,8 +675,6 @@ MAX_QUEUE = int(os.environ.get('MAX_QUEUE', '15'))
 
 async def _enqueue_job(job):
     """Queue me daalo aur user ko uski position batao."""
-    global worker_busy
-
     user_id = job["user_chat_id"]
     msg_id = job["call_msg_id"]
 
@@ -788,6 +787,12 @@ def start_telethon_thread():
         except Exception as e:
             print(f"[telethon] connect fail: {e} — 30s me retry")
             time.sleep(30)
+
+    global USERBOT_ID
+    try:
+        USERBOT_ID = int(getattr(me, "id", 0) or 0)
+    except Exception:
+        USERBOT_ID = 0
 
     job_queue = asyncio.Queue()
     loop.create_task(_download_worker())
@@ -1977,7 +1982,7 @@ def handle_utr(message):
 
     owner_text = (
         "🔔 NEW PAYMENT CLAIM\n\n"
-        f"User: {message.from_user.first_name} (id: {message.from_user.id})\n"
+        f"User: {getattr(message.from_user, 'first_name', '')} (id: {message.from_user.id})\n"
         f"Order: {order_id}\n"
         f"Amount: Rs {order.get('price')}\n"
         f"Days: {order.get('days')}\n"
@@ -2563,7 +2568,8 @@ def _finalize_delivery(chat_id, sent, markup, tries=5):
 
 @bot.message_handler(func=lambda msg: msg.text and msg.text.startswith("DELIVER "))
 def handle_delivery(message):
-    if message.from_user.id != OWNER_ID:
+    sender = getattr(message.from_user, "id", 0)
+    if sender not in (OWNER_ID, USERBOT_ID):
         return
 
     try:

@@ -515,7 +515,7 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
 
             # ---> CASE B: PROGRESS BAR MIRRORING <---
             _low_txt = (msg.text or "").lower()
-            if msg.text and any(k in _low_txt for k in (
+            if msg.text and not (getattr(msg, "forward", None) or getattr(msg, "fwd_from", None)) and any(k in _low_txt for k in (
                 "progress", "speed", "eta", "uploading", "downloading",
                 "done:", "total:", "true size", "elapsed", "%",
                 "codec", "optimiz", "checking video", "high-speed", "upload"
@@ -544,21 +544,32 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
                 and str(getattr(msg.document, "mime_type", "")).startswith("video")
             )
             _elapsed = time.time() - started_at
-            # target bot ka download-result caption ("Size: ...", "auto-deleted",
-            # "Thanks for using") — cache wali video turant isi se pakdi jaati hai
+            # Promo messages target bot kisi CHANNEL se FORWARD karta hai
+            # (Star bots wali list, "Only On: @Stardealsxbot" wali video).
+            # Asli download kabhi forwarded nahi hota.
+            _is_forwarded = bool(
+                getattr(msg, "forward", None) or getattr(msg, "fwd_from", None)
+            )
+
+            # download-result caption ("Size: ...", "auto-deleted", "Thanks for using")
             _cap = (msg.text or "").lower()
             _cap_is_download = any(k in _cap for k in (
                 "size:", "auto-delete", "auto deleted", "thanks for using",
                 "downloaded by", "duration:",
             ))
+
             _is_ours = (
                 ad_clicked
                 or quality_clicked
                 or getattr(msg, "reply_to_msg_id", None) == sent_link.id
                 or saw_progress                # target bot ne download progress bheja
                 or _cap_is_download            # already-cached video (seedha result)
-                or (_dur >= 10 and _elapsed > 30)   # 30s baad badi video = asli download
+                or (_dur >= 10 and _elapsed > 90 and not _is_forwarded)
             )
+
+            if _is_forwarded and (msg.video or msg.document):
+                print("[telethon] forwarded promo file ignore kiya")
+                continue
             if (msg.video or msg.document) and not (_is_video and _is_ours):
                 print(
                     f"[telethon] file ignore kiya (video={bool(msg.video)} dur={_dur} "

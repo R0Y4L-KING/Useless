@@ -457,6 +457,7 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
     print(f"[telethon] Link sent to target bot for user {user_chat_id} (msg {last_seen_id})")
 
     forwarded_video_ids = set()
+    saw_progress = False
     ad_clicked = False
     quality_clicked = False
     last_progress_text = ""
@@ -530,6 +531,7 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
                         reply_markup=plan_markup,
                     )
                     last_progress_text = progress_text
+                    saw_progress = True
                 continue # Agar progress bar hai, to aage button check karne ki zarurat nahi
 
             # ---> CASE C: Video Aagayi <---
@@ -541,18 +543,19 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
                 bool(msg.document)
                 and str(getattr(msg.document, "mime_type", "")).startswith("video")
             )
+            _elapsed = time.time() - started_at
             _is_ours = (
                 ad_clicked
                 or quality_clicked
                 or getattr(msg, "reply_to_msg_id", None) == sent_link.id
-                or _dur >= 10          # asli video (promo clips chhote hote hain)
-                or bool(msg.document)  # document ke roop me aayi video
+                or saw_progress               # target bot ne download progress bheja
+                or (_dur >= 10 and _elapsed > 60)  # 1 min baad badi video = asli download
             )
             if (msg.video or msg.document) and not (_is_video and _is_ours):
                 print(
                     f"[telethon] file ignore kiya (video={bool(msg.video)} dur={_dur} "
                     f"reply={getattr(msg, 'reply_to_msg_id', None)} ad={ad_clicked} "
-                    f"quality={quality_clicked})"
+                    f"quality={quality_clicked} progress={saw_progress})"
                 )
                 continue
 

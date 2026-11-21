@@ -391,6 +391,27 @@ def schedule_auto_delete(chat_id, message_id, delay):
 
 # ================= TELETHON SIDE (Userbot Relay) =================
 
+_TARGET_BRANDS = ("galaxy", "thestar", "stardeals", "starbot", "star_bots")
+
+
+def _brand_fix(text):
+    """Target bot ke message me uska naam/handle ho to apna laga do."""
+    if not text:
+        return text
+
+    def _repl(m):
+        handle = m.group(0)
+        if any(b in handle.lower() for b in _TARGET_BRANDS):
+            return SUPPORT_CHANNEL
+        return handle
+
+    text = re.sub(r"@[A-Za-z0-9_]{3,}", _repl, text)
+    text = re.sub(
+        r"(?i)(report us at\s+)@[A-Za-z0-9_]{3,}", r"\1" + SUPPORT_CHANNEL, text
+    )
+    return text
+
+
 async def _send_start_to_target():
     try:
         await client.send_message(TARGET_BOT, "/start")

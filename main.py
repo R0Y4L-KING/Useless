@@ -512,6 +512,7 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
                     _clean = re.sub(r"\s*\[\s*\d+\s*/\s*\d+\s*\]\s*", " ", msg.text)
                     _clean = _clean.replace("🔍", "")
                     _clean = re.sub(r"\s{2,}", " ", _clean).strip()
+                    _clean = _brand_fix(_clean)
                     _msg = _clean if len(_clean) > 10 else "❌ Download Failed. Kripya doosra link try karein."
                     _edit(user_chat_id, call_msg_id, _msg)
                     return False
@@ -523,7 +524,7 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
                 "done:", "total:", "true size", "elapsed", "%",
                 "codec", "optimiz", "checking video", "high-speed", "upload"
             )):
-                progress_text = msg.text
+                progress_text = _brand_fix(msg.text)
                 if progress_text != last_progress_text:
                     plan_markup = types.InlineKeyboardMarkup()
                     plan_markup.add(types.InlineKeyboardButton("💎 Buy Premium", callback_data="premium_menu"))

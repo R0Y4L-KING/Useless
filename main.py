@@ -540,12 +540,24 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
 
             # ---> CASE B: PROGRESS BAR MIRRORING <---
             _low_txt = (msg.text or "").lower()
-            if msg.text and not (getattr(msg, "forward", None) or getattr(msg, "fwd_from", None)) and any(k in _low_txt for k in (
-                "progress", "speed", "eta", "uploading", "downloading",
-                "done:", "total:", "true size", "elapsed", "%",
-                "codec", "optimiz", "checking video", "high-speed", "upload"
-            )):
-                progress_text = _brand_fix(msg.text)
+            _promo_like = any(k in _low_txt for k in (
+                "all bots", "increased by", "join @", "subscribe", "t.me/",
+                "our channel", "invite", "refer",
+            ))
+            if (msg.text and not _promo_like
+                    and not (getattr(msg, "forward", None) or getattr(msg, "fwd_from", None))
+                    and any(k in _low_txt for k in (
+                        "progress", "eta", "uploading", "downloading",
+                        "done:", "total:", "true size", "elapsed", "%",
+                        "codec", "optimiz", "checking video", "high-speed",
+                        "fetching", "video formats", "analyzing", "extracting",
+                        "preparing", "converting", "please wait"
+                    ))):
+                progress_text = re.sub(
+                    r"\s*\[\s*\d+\s*/\s*\d+\s*\]\s*", " ", msg.text
+                ).replace("🔍", "")
+                progress_text = re.sub(r"\s{2,}", " ", progress_text).strip()
+                progress_text = _brand_fix(progress_text)
                 if progress_text != last_progress_text:
                     plan_markup = types.InlineKeyboardMarkup()
                     plan_markup.add(types.InlineKeyboardButton("💎 Buy Premium", callback_data="premium_menu"))

@@ -33,7 +33,7 @@ BOT_TOKEN = os.environ.get('BOT_TOKEN', '')
 OWNER_ID = int(os.environ.get('OWNER_ID', ''))
 
 # Target Bot
-TARGET_BOT = os.environ.get('TARGET_BOT', '@Doubtbustbot')
+TARGET_BOT = os.environ.get('TARGET_BOT', '@payxstarbot')
 
 # Branding
 BRAND = "@ModAppsKing"

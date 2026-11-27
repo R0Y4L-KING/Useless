@@ -412,6 +412,41 @@ def _brand_fix(text):
     return text
 
 
+def _format_status(text):
+    """Target bot ka status text — line structure bachao, bar ko code block me.
+
+    (Pehle hum saari newlines collapse kar rahe the, isliye sab ek line me
+    chipak jaata tha.)
+    """
+    if not text:
+        return text
+
+    text = re.sub(r"\s*\[\s*\d+\s*/\s*\d+\s*\]\s*", "", text)
+    text = text.replace("🔍", "")
+
+    lines = [ln.rstrip() for ln in text.splitlines()]
+
+    cleaned, blank = [], False
+    for ln in lines:
+        if not ln.strip():
+            if not blank:
+                cleaned.append("")
+            blank = True
+        else:
+            cleaned.append(ln)
+            blank = False
+
+    out = []
+    for ln in cleaned:
+        is_bar = ("%" in ln) and any(ch in ln for ch in "█▒░▰▱|#")
+        if is_bar:
+            out.extend(["```", ln.strip(), "```"])
+        else:
+            out.append(ln)
+
+    return "\n".join(out).strip()
+
+
 async def _send_start_to_target():
     try:
         await client.send_message(TARGET_BOT, "/start")
@@ -530,10 +565,7 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
                     print(f"[telethon] Target bot fail ho gaya: '{_hit}'")
                     refund_download(user_chat_id, refund_kind)
                     # target bot ka hi message dikhao — bas uska [1/1] marker hatao
-                    _clean = re.sub(r"\s*\[\s*\d+\s*/\s*\d+\s*\]\s*", " ", msg.text)
-                    _clean = _clean.replace("🔍", "")
-                    _clean = re.sub(r"\s{2,}", " ", _clean).strip()
-                    _clean = _brand_fix(_clean)
+                    _clean = _brand_fix(_format_status(msg.text))
                     _msg = _clean if len(_clean) > 10 else "❌ Download Failed. Kripya doosra link try karein."
                     _edit(user_chat_id, call_msg_id, _msg)
                     return False
@@ -553,11 +585,7 @@ async def _fetch_from_target(url, user_chat_id, call_msg_id, refund_kind=""):
                         "fetching", "video formats", "analyzing", "extracting",
                         "preparing", "converting", "please wait"
                     ))):
-                progress_text = re.sub(
-                    r"\s*\[\s*\d+\s*/\s*\d+\s*\]\s*", " ", msg.text
-                ).replace("🔍", "")
-                progress_text = re.sub(r"\s{2,}", " ", progress_text).strip()
-                progress_text = _brand_fix(progress_text)
+                progress_text = _brand_fix(_format_status(msg.text))
                 if progress_text != last_progress_text:
                     plan_markup = types.InlineKeyboardMarkup()
                     plan_markup.add(types.InlineKeyboardButton("💎 Buy Premium", callback_data="premium_menu"))
